@@ -35,7 +35,7 @@ class PaymentService:
                     ],
                 },
             },
-            idempotence_key=idempotence_key,
+            idempotence_key,
         )
         return payment.id, payment.confirmation.confirmation_url
 
