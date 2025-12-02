@@ -4,14 +4,11 @@ import re
 from datetime import datetime, timedelta
 from typing import Any, Awaitable, Callable
 
-import yookassa
 from aiogram import BaseMiddleware, Bot, Dispatcher, F, types
 from aiogram.filters import StateFilter
 from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.types import FSInputFile, InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup
-from yookassa import Payment
+from aiogram.types import FSInputFile, InlineKeyboardButton, InlineKeyboardMarkup
 
 from api_requests import VPNApi
 from config import (
@@ -27,16 +24,11 @@ from config import (
     VIDEOS_DIR,
 )
 from database import VPNDatabase
+from keyboards import get_admin_keyboard, get_main_keyboard, get_vpn_guide_keyboard
+from services.payment_service import PaymentService
+from services.subscription_service import SubscriptionService
+from states import AdminState, EmailState
 from utils import VPNUtils
-
-# Фильтры
-class EmailState(StatesGroup):
-    waiting_for_email = State()
-
-class AdminState(StatesGroup):
-    waiting_for_user_id = State()
-    waiting_for_username = State()
-    waiting_for_delete_user = State()
 
 
 class AdminOnlyMiddleware(BaseMiddleware):
@@ -84,9 +76,6 @@ if not ADMIN_IDS:
 if not SHOP_ID or not SHOP_API:
     logging.warning("SHOP_ID or SHOP_API is not configured. Payments will not work until values are set.")
 
-yookassa.Configuration.account_id = SHOP_ID
-yookassa.Configuration.secret_key = SHOP_API
-
 # Инициализация бота
 from aiogram.client.default import DefaultBotProperties
 
@@ -101,6 +90,8 @@ dp.callback_query.middleware.register(admin_middleware)
 # База данных и API
 vpn_api = VPNApi()
 database = VPNDatabase()
+payment_service = PaymentService(SHOP_ID, SHOP_API, PAYMENT_RETURN_URL)
+subscription_service = SubscriptionService(database, vpn_api)
 
 async def simulate_activity():
     while True:
@@ -160,101 +151,47 @@ async def check_subscriptions():
 async def get_user_subscription_status(chat_id):
     return database.get_subscription_status(chat_id)
 
-async def create_payment(amount, chat_id, email):
-    payment = yookassa.Payment.create({
-        "amount": {
-            "value": str(amount),
-            "currency": "RUB"
-        },
-        "confirmation": {
-            "type": "redirect",
-            "return_url": PAYMENT_RETURN_URL
-        },
-        "capture": True,
-        "description": f"Оплата VPN для {chat_id}",
-        "metadata": {"chat_id": chat_id},
-        "receipt": {
-            "customer": {
-                "email": email
-            },
-            "items": [
-                {
-                    "description": "Оплата VPN",
-                    "quantity": 1,
-                    "amount": {
-                        "value": str(amount),
-                        "currency": "RUB"
-                    },
-                    "vat_code": 1
-                }
-            ]
-        }
-    })
-    return payment.id, payment.confirmation.confirmation_url
-
-
-async def activate_subscription(chat_id):
-    user_data = database.get_user(chat_id)
-    now = datetime.now()
-    chat = await bot.get_chat(chat_id)
-    username = f"@{chat.username}" if chat.username else "Без username"
-
-    if user_data:
-        expiry_date = datetime.strptime(user_data[2], "%d.%m.%Y %H:%M")
-        new_expiry_date = expiry_date + timedelta(days=30)
-        new_expiry_str = new_expiry_date.strftime("%d.%m.%Y %H:%M")
-
-        success = vpn_api.renew_vpn(user_data[4], user_data[5], int(new_expiry_date.timestamp() * 1000))
-
-        if success:
-            database.update_expiry_date(chat_id, new_expiry_str)
-            await bot.send_message(
-                chat_id,
-                escape_markdown_v2(f"✅ Подписка продлена!\n⏳ Действительна до: {new_expiry_str}"),
-                parse_mode="MarkdownV2"
-            )
-        else:
-            await bot.send_message(
-                chat_id,
-                escape_markdown_v2("❌ Ошибка продления подписки. Свяжитесь с поддержкой.\n@hirakiri_shogun"),
-                parse_mode="MarkdownV2"
-            )
-        return
-
-    new_expiry_date = now + timedelta(days=30)
-    new_expiry_str = new_expiry_date.strftime("%d.%m.%Y %H:%M")
-
-    email = VPNUtils.get_vpn_email(chat_id)
-    vpn_api.select_server()
-
+async def create_payment(amount: float, chat_id: int, email: str):
     try:
-        vless_key, inbound_id, server_url = vpn_api.buy_vpn(email, 0)
+        return payment_service.create_payment(amount, chat_id, email)
     except Exception as e:
-        await bot.send_message(
-            chat_id,
-            escape_markdown_v2("❌ Ошибка при активации VPN. Обратитесь в поддержку.\n@hirakiri_shogun"),
-            parse_mode="MarkdownV2"
-        )
-        return
+        logging.exception("Ошибка создания платежа: %s", e)
+        return None, None
 
-    if vless_key:
-        database.add_user(chat_id, username, vless_key, new_expiry_str, inbound_id, server_url)
-        await bot.send_message(
-            chat_id,
-            f"✅ *Подписка активирована!*\n\n"
-            f"🔑 *Ваш VLESS-ключ:*\n```\n{vless_key}\n```\n"
-            f"⏳ *Действителен до:* {new_expiry_str}\n\n"
-            "🔄 *Продлите подписку, чтобы не потерять доступ!* 🚀",
-            parse_mode="Markdown",
-            reply_markup=await get_main_keyboard(chat_id)
-        )
+
+async def activate_subscription(chat_id: int):
+    success = await subscription_service.activate_or_extend(chat_id, bot)
+    if success:
         await how_to_use_auto(chat_id)
-    else:
-        await bot.send_message(
-            chat_id,
-            escape_markdown_v2("❌ Ошибка активации. Свяжитесь с поддержкой @hirakiri_shogun"),
-            parse_mode="MarkdownV2"
-        )
+
+
+async def handle_activation_with_retries(chat_id: int):
+    """Пробует активировать/продлить до 3 раз с интервалом 60 сек."""
+    max_attempts = 3
+    delay_seconds = 60
+    for attempt in range(1, max_attempts + 1):
+        success = await subscription_service.activate_or_extend(chat_id, bot)
+        if success:
+            await how_to_use_auto(chat_id)
+            return
+        if attempt == 1:
+            await bot.send_message(
+                chat_id,
+                "🔄 Оплата подтверждена, продлеваем доступ. Ключ обновится в течение 3 минут.",
+            )
+        if attempt < max_attempts:
+            await asyncio.sleep(delay_seconds)
+        else:
+            # Последняя попытка не удалась — уведомляем админа
+            admin_id = ADMIN_IDS[0]
+            await bot.send_message(
+                chat_id,
+                "⚠️ Не удалось обновить доступ автоматически. Передали запрос администратору.",
+            )
+            await bot.send_message(
+                admin_id,
+                f"⚠️ Не удалось продлить/активировать для пользователя {chat_id} после оплаты. Проверь 3x-ui и базу.",
+            )
 
 
 async def check_payment_status():
@@ -262,17 +199,17 @@ async def check_payment_status():
         pending_payments = database.get_pending_payments()
 
         for payment_id, chat_id in pending_payments:
-            payment = Payment.find_one(payment_id)
-            if payment is None:
+            status = payment_service.get_payment_status(payment_id)
+            if status is None:
                 continue
 
-            if payment.status == 'succeeded':
-                database.update_payment_status(payment_id, 'succeeded')
-                await activate_subscription(chat_id)
+            if status == "succeeded":
+                database.update_payment_status(payment_id, "succeeded")
+                asyncio.create_task(handle_activation_with_retries(chat_id))
                 database.remove_payment(payment_id)
 
-            elif payment.status in ['canceled', 'failed']:
-                database.update_payment_status(payment_id, payment.status)
+            elif status in ["canceled", "failed"]:
+                database.update_payment_status(payment_id, status)
                 database.remove_payment(payment_id)
 
         await asyncio.sleep(10)
@@ -284,15 +221,9 @@ async def how_to_use_auto(chat_id):
         "Выберите вашу платформу ниже ⬇️\n"
         "Мы предоставим подробную инструкцию по установке и настройке StormyVPN.",
         parse_mode="Markdown",
-        reply_markup=await get_vpn_guide_keyboard()
+        reply_markup=get_vpn_guide_keyboard()
     )
     
-import re
-
-def escape_markdown_v2(text: str) -> str:
-    """Экранирует специальные символы для Telegram MarkdownV2"""
-    escape_chars = r'([_*\[\]()~`>#+\-=|{}.!])'
-    return re.sub(escape_chars, r'\\\1', text)
 
 
 
@@ -304,67 +235,6 @@ def escape_markdown_v2(text: str) -> str:
 
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-#-------------------------------------------------------------------------------------------------------------------------------------------
-# Главное меню
-async def get_main_keyboard(chat_id):
-    status = database.get_subscription_status(chat_id)
-    buttons = [
-        [KeyboardButton(text="Продлить VPN 🔑") if status == "active" else KeyboardButton(text="Оформить VPN 💳")],
-        [KeyboardButton(text="Личный кабинет 👤")],
-        [KeyboardButton(text="Как настроить VPN? 📖")]
-    ]
-    if chat_id in ADMIN_IDS:
-        buttons.append([KeyboardButton(text="Администрирование ⚙️")])
-    
-    return ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
-
-
-async def get_vpn_guide_keyboard():
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📱 Android / Windows", callback_data="vpn_guide_android_windows")],
-        [InlineKeyboardButton(text="🍏 iOS / macOS", callback_data="vpn_guide_ios_mac")]
-    ])
-
-
-# ----- Админ панель -----
-async def get_admin_keyboard():
-    return ReplyKeyboardMarkup(keyboard=[
-        [KeyboardButton(text="Посмотреть всех пользователей")],
-        [KeyboardButton(text="Удалить пользователя по ID")],
-        [KeyboardButton(text="Добавить пользователя")],
-        [KeyboardButton(text="Написать сообщение всем пользователям")],
-        [KeyboardButton(text="Послать подарки 🎁")], 
-        [KeyboardButton(text="Синхронизировать базу данных 🔄")],
-        # [KeyboardButton(text="Восстановить пользователей 55555")],  # Новая кнопка
-        # [KeyboardButton(text="Восстановить пользователей 5278")],
-        # [KeyboardButton(text="Очистить всю базу данных")],
-        [KeyboardButton(text="Главное меню")]
-    ], resize_keyboard=True)
 
 
 @dp.message(F.text == "/start")
@@ -386,7 +256,9 @@ async def start_message(message: types.Message):
     """
 
     photo = FSInputFile(IMAGES_DIR / "preview.jpg")
-    await bot.send_photo(chat_id, photo, caption=welcome_text, reply_markup=await get_main_keyboard(chat_id))
+    status = database.get_subscription_status(chat_id)
+    reply_kb = get_main_keyboard(status, chat_id in ADMIN_IDS)
+    await bot.send_photo(chat_id, photo, caption=welcome_text, reply_markup=reply_kb)
     
 @dp.message(F.text.in_(["Оформить VPN 💳", "Продлить VPN 🔑"]))
 async def ask_for_email(message: types.Message, state: FSMContext):
@@ -401,7 +273,9 @@ async def process_email(message: types.Message, state: FSMContext):
     
     if email.lower() == "отмена":
         await state.clear()
-        await message.answer("❌ Ввод email отменён.", reply_markup=await get_main_keyboard(message.chat.id))
+        status = database.get_subscription_status(message.chat.id)
+        reply_kb = get_main_keyboard(status, message.chat.id in ADMIN_IDS)
+        await message.answer("❌ Ввод email отменён.", reply_markup=reply_kb)
         return
     
     if not re.match(r'^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+$', email):
@@ -410,8 +284,10 @@ async def process_email(message: types.Message, state: FSMContext):
     
     await state.clear()
 
-    amount = 149
+    amount = 1
     payment_id, payment_link = await create_payment(amount, message.chat.id, email)
+    if not payment_id or not payment_link:
+        return await message.answer("❌ Не удалось создать платеж. Попробуйте позже или свяжитесь с поддержкой.")
     database.add_payment(message.chat.id, payment_id, amount)
     
     markup = InlineKeyboardMarkup(inline_keyboard=[
@@ -439,7 +315,9 @@ async def user_profile(message: types.Message):
                 f"⏳ *Действителен до:* {expiry_date}\n\n"
                 f"🔄 *Продлите подписку, чтобы не потерять доступ!* 🚀",
             parse_mode='Markdown',
-            reply_markup=await get_main_keyboard(chat_id)
+            reply_markup=get_main_keyboard(
+                database.get_subscription_status(chat_id), chat_id in ADMIN_IDS
+            )
         )
 
     else:
@@ -450,12 +328,16 @@ async def user_profile(message: types.Message):
 async def admin_panel(message):
     chat_id = message.chat.id
     if chat_id in ADMIN_IDS:
-        await message.answer("Добро пожаловать в админ панель", reply_markup=await get_admin_keyboard())
+        await message.answer("Добро пожаловать в админ панель", reply_markup=get_admin_keyboard())
         
 @dp.message(F.text == "Главное меню")
 async def back_to_main_menu(message: types.Message):
     chat_id = message.chat.id
-    await message.answer("Вы вернулись в главное меню 🏠", reply_markup=await get_main_keyboard(chat_id))
+    status = database.get_subscription_status(chat_id)
+    await message.answer(
+        "Вы вернулись в главное меню 🏠",
+        reply_markup=get_main_keyboard(status, chat_id in ADMIN_IDS),
+    )
 
 @dp.message(F.text == "Посмотреть всех пользователей")
 async def show_all_users(message: types.Message):
@@ -491,18 +373,18 @@ async def delete_user_by_id(message: types.Message, state: FSMContext):
 async def process_delete_user(message: types.Message, state: FSMContext):
     chat_id = message.chat.id
     if message.text.lower() == "отмена":
-        await message.answer("❌ Действие отменено.", reply_markup=await get_admin_keyboard())
+        await message.answer("❌ Действие отменено.", reply_markup=get_admin_keyboard())
         await state.clear()
         return
 
     try:
         user_id = int(message.text)
         if database.remove_user(user_id):
-            await message.answer(f"✅ Пользователь {user_id} удалён.", reply_markup=await get_admin_keyboard())
+            await message.answer(f"✅ Пользователь {user_id} удалён.", reply_markup=get_admin_keyboard())
         else:
-            await message.answer("❌ Пользователь не найден.", reply_markup=await get_admin_keyboard())
+            await message.answer("❌ Пользователь не найден.", reply_markup=get_admin_keyboard())
     except ValueError:
-        await message.answer("🚫 Введите корректный числовой ID.", reply_markup=await get_admin_keyboard())
+        await message.answer("🚫 Введите корректный числовой ID.", reply_markup=get_admin_keyboard())
 
     await state.clear()
         
@@ -517,7 +399,7 @@ async def add_user(message: types.Message, state: FSMContext):
 async def process_add_user_id(message: types.Message, state: FSMContext):
     chat_id = message.chat.id
     if message.text.lower() == "отмена":
-        await message.answer("❌ Действие отменено.", reply_markup=await get_admin_keyboard())
+        await message.answer("❌ Действие отменено.", reply_markup=get_admin_keyboard())
         await state.clear()
         return
     try:
@@ -526,13 +408,13 @@ async def process_add_user_id(message: types.Message, state: FSMContext):
         await message.answer("✅ Теперь введите username пользователя. Или отправьте 'Отмена'.")
         await state.set_state(AdminState.waiting_for_username)
     except ValueError:
-        await message.answer("🚫 Введите корректный числовой ID.", reply_markup=await get_admin_keyboard())
+        await message.answer("🚫 Введите корректный числовой ID.", reply_markup=get_admin_keyboard())
 
 @dp.message(StateFilter(AdminState.waiting_for_username))
 async def process_add_user_username(message: types.Message, state: FSMContext):
     chat_id = message.chat.id
     if message.text.lower() == "отмена":
-        await message.answer("❌ Действие отменено.", reply_markup=await get_admin_keyboard())
+        await message.answer("❌ Действие отменено.", reply_markup=get_admin_keyboard())
         await state.clear()
         return
 
@@ -542,15 +424,21 @@ async def process_add_user_username(message: types.Message, state: FSMContext):
 
     email = VPNUtils.get_vpn_email(user_id)
     vpn_api.select_server()
-    vless_key, inbound_id, server_url = vpn_api.buy_vpn(email, 0)
+    try:
+        vless_key, inbound_id, server_url = vpn_api.buy_vpn(email, 0)
+    except Exception as e:
+        logging.exception("Ошибка выдачи ключа при ручном добавлении пользователя: %s", e)
+        await message.answer("❌ Ошибка при получении VPN-ключа.", reply_markup=get_admin_keyboard())
+        await state.clear()
+        return
 
     if vless_key:
         expiry_date = VPNUtils.format_expiry_date(datetime.now() + timedelta(days=365))
         
         database.add_user(user_id, username, vless_key, expiry_date, inbound_id, server_url)
-        await message.answer(f"✅ Пользователь {username} (ID: {user_id}) успешно добавлен!", reply_markup=await get_admin_keyboard())
+        await message.answer(f"✅ Пользователь {username} (ID: {user_id}) успешно добавлен!", reply_markup=get_admin_keyboard())
     else:
-        await message.answer("❌ Ошибка при получении VPN-ключа.", reply_markup=await get_admin_keyboard())
+        await message.answer("❌ Ошибка при получении VPN-ключа.", reply_markup=get_admin_keyboard())
 
     await state.clear()
 
@@ -634,319 +522,6 @@ async def process_broadcast_message(message: types.Message, state: FSMContext):
 
     await message.answer(f"✅ Сообщение отправлено {sent_count} пользователям.\n❌ Не удалось отправить {failed_count}.")
     
-@dp.message(F.text == "Послать подарки 🎁")
-async def ask_for_gift_days(message: types.Message, state: FSMContext):
-    chat_id = message.chat.id
-    if chat_id in ADMIN_IDS:
-        await message.answer("🎁 На сколько дней продлить подписку всем пользователям? Введите число:")
-        await state.set_state("awaiting_gift_days")
-    else:
-        await message.answer("🚫 У вас нет доступа.")
-
-@dp.message(StateFilter("awaiting_gift_days"))
-async def process_gift_days(message: types.Message, state: FSMContext):
-    chat_id = message.chat.id
-    if not message.text.isdigit():
-        await message.answer("🚫 Введите число дней!")
-        return
-
-    days = int(message.text)
-    await message.answer(f"🎁 Продлеваем подписку всем пользователям на {days} дней...")
-
-    add_days_to_all_users(days)
-
-    await message.answer(f"✅ Подписка успешно продлена всем на {days} дней!")
-    await state.clear()
-
-
-def add_days_to_all_users(days):
-    users = database.get_all_users()  # Получаем всех пользователей
-
-    for user in users:
-        chat_id, username, expiry_date, _, _, inbound_id, server_url = user
-
-        # 🔄 1. Получаем актуальные данные с сервера
-        server_data = vpn_api.get_inbound_data(inbound_id, server_url)
-
-        if not server_data or "expiryTime" not in server_data:
-            print(f"❌ inbound_id {inbound_id} не найден на сервере {server_url} или нет `expiryTime`. Пропускаем {chat_id}.")
-            continue  # Пропускаем пользователя, не удаляем!
-
-        # 🔄 2. Обновляем БД, если серверные данные отличаются
-        server_expiry_timestamp = server_data["expiryTime"]
-        server_expiry_date = datetime.fromtimestamp(server_expiry_timestamp / 1000)
-        server_expiry_str = VPNUtils.format_expiry_date(server_expiry_date)
-
-        if expiry_date != server_expiry_str:
-            print(f"🔄 Синхронизация: обновляем {chat_id}. Сервер: {server_expiry_str}, БД: {expiry_date}")
-            database.update_expiry_date(chat_id, server_expiry_str)
-
-        # 🔄 3. Продлеваем подписку на `days` дней
-        new_expiry_date = server_expiry_date + timedelta(days=days)
-        new_expiry_timestamp = int(new_expiry_date.timestamp() * 1000)
-
-        print(inbound_id)
-        print(server_url)
-        print(new_expiry_timestamp)
-        is_renewed = vpn_api.renew_vpn(inbound_id, server_url, new_expiry_timestamp)
-
-        if is_renewed:
-            new_expiry_str = new_expiry_date.strftime("%d.%m.%Y %H:%M")
-            database.update_expiry_date(chat_id, new_expiry_str)
-            print(f"✅ {username} (ID: {chat_id}) → подписка продлена до {new_expiry_str}")
-        else:
-            print(f"❌ Ошибка продления для {username} (ID: {chat_id}). БД НЕ ОБНОВЛЯЕМ.")
-            
-@dp.message(F.text == "Синхронизировать базу данных 🔄")
-async def sync_database(message: types.Message):
-    chat_id = message.chat.id
-    if chat_id not in ADMIN_IDS:
-        return await message.answer("🚫 У вас нет доступа.")
-
-    users = database.get_all_users()
-    deleted_users = []
-    synced_users = []
-
-    for user in users:
-        chat_id, username, expiry_date, _, _, inbound_id, server_url = user
-        server_data = vpn_api.get_inbound_data(inbound_id, server_url)
-
-        if not server_data:
-            database.remove_user(chat_id)
-            deleted_users.append(chat_id)
-            continue
-
-        server_expiry_timestamp = server_data.get("expiryTime")
-        if not server_expiry_timestamp:
-            database.remove_user(chat_id)
-            deleted_users.append(chat_id)
-            continue
-
-        server_expiry_date = datetime.fromtimestamp(server_expiry_timestamp / 1000)
-        server_expiry_str = VPNUtils.format_expiry_date(server_expiry_date)
-
-        if expiry_date != server_expiry_str:
-            database.update_expiry_date(chat_id, server_expiry_str)
-            synced_users.append(chat_id)
-
-    await message.answer(f"✅ Синхронизация завершена!\n🗑️ Удалено: {len(deleted_users)}\n🔄 Обновлено: {len(synced_users)}")
-
-
-@dp.message(F.text == "Восстановить пользователей 55555")
-async def restore_55555_users(message: types.Message, state: FSMContext):
-    chat_id = message.chat.id
-    if chat_id not in ADMIN_IDS:
-        return await message.answer("🚫 У вас нет доступа к этой команде.")
-
-    await message.answer("🔄 Начинаю восстановление пользователей сервера 55555...")
-
-    users_to_restore = [
-        {"id": 196880451, "username": "@Assia_G"},
-        {"id": 310694093, "username": "@Mariya_forev"},
-        {"id": 397835983, "username": "@Nikolai_p40"},
-        {"id": 533802354, "username": "@july_razumova"},
-        {"id": 642454649, "username": "@Alexandr_S_K"},
-        {"id": 693473103, "username": "@margarita_kuzz"},
-        {"id": 801912621, "username": "@puddddding7"},
-        {"id": 911348507, "username": "@Artemi_a_ne_artem"},
-        {"id": 956526375, "username": "Без username"},
-        {"id": 1040013169, "username": "@Kirill_Luzianin"},
-        {"id": 1150730884, "username": "Без username"},
-        {"id": 1350269200, "username": "@Suleimanova_Elvina"},
-        {"id": 1439561399, "username": "Без username"},
-        {"id": 1626378585, "username": "Без username"},
-        {"id": 1681246178, "username": "@nastyvasy"},
-        {"id": 1772395192, "username": "Без username"},
-        {"id": 1815468502, "username": "@ShAlbina123"},
-        {"id": 5129380769, "username": "Без username"},
-        {"id": 5169289993, "username": "Без username"}
-    ]
-
-    restored_count = 0
-    errors = []
-
-    for user in users_to_restore:
-        try:
-            # Получаем данные пользователя
-            user_id = user["id"]
-            username = user["username"]
-            
-            # Используем встроенный метод активации подписки (как при оплате)
-            email = VPNUtils.get_vpn_email(user_id)
-            
-            # Устанавливаем срок подписки (40 дней)
-            expiry_date = datetime.now() + timedelta(days=40)
-            expiry_str = expiry_date.strftime("%d.%m.%Y %H:%M")
-            
-            # Получаем chat объект для username
-            try:
-                chat = await bot.get_chat(user_id)
-                username = f"@{chat.username}" if chat.username else username
-            except:
-                pass
-            
-            # Проверяем, есть ли уже пользователь
-            if database.get_user(user_id):
-                # Обновляем подписку
-                database.update_expiry_date(user_id, expiry_str)
-                await message.answer(f"♻️ Обновлен пользователь {username} (ID: {user_id})")
-            else:
-                # Активируем подписку (имитируем успешную оплату)
-                await activate_subscription(user_id)
-                await message.answer(f"✅ Добавлен пользователь {username} (ID: {user_id})")
-            
-            restored_count += 1
-            
-        except Exception as e:
-            error_msg = f"❌ Ошибка при восстановлении {username} (ID: {user_id}): {str(e)}"
-            errors.append(error_msg)
-            print(error_msg)
-    
-    # Формируем итоговый отчет
-    result_message = (
-        f"🔚 Восстановление завершено!\n"
-        f"✅ Успешно: {restored_count}\n"
-        f"❌ Ошибок: {len(errors)}"
-    )
-    
-    if errors:
-        # Сохраняем ошибки в файл
-        error_file = DATA_DIR / "restore_errors.txt"
-        with open(error_file, "w", encoding="utf-8") as f:
-            f.write("\n".join(errors))
-        
-        # Отправляем файл с ошибками
-        doc = FSInputFile(error_file)
-        await message.answer_document(doc, caption=result_message)
-    else:
-        await message.answer(result_message)
-
-@dp.message(F.text == "Восстановить пользователей 5278")
-async def restore_55555_users(message: types.Message, state: FSMContext):
-    chat_id = message.chat.id
-    if chat_id not in ADMIN_IDS:
-        return await message.answer("🚫 У вас нет доступа к этой команде.")
-
-    await message.answer("🔄 Начинаю восстановление пользователей сервера 55555...")
-
-    users_to_restore = [
-        {"id": 20732275, "username": "Без username"},
-        {"id": 244408185, "username": "@mikhailgorbunoff"},
-        {"id": 265196721, "username": "@Juliia_N"},
-        {"id": 359319167, "username": "@ttnbgltsv"},
-        {"id": 412792458, "username": "Без username"},
-        {"id": 523614412, "username": "@anastasstepanenko"},
-        {"id": 827776464, "username": "Без username"},
-        {"id": 852063364, "username": "Без username"},
-        {"id": 950866927, "username": "@Timofey1211"},
-        {"id": 983360115, "username": "@OkiAniki"},
-        {"id": 1044005195, "username": "@m_iiiig"},
-        {"id": 1070585275, "username": "@hokkaido228"},
-        {"id": 1285437127, "username": "@kvkk_k"},
-        {"id": 1559034649, "username": "@murchik1984"},
-        {"id": 1694692368, "username": "@DashaLuzyanina"},
-        {"id": 6093611141, "username": "@mir_antenn_ek"}
-    ]
-
-    restored_count = 0
-    errors = []
-
-    for user in users_to_restore:
-        try:
-            # Получаем данные пользователя
-            user_id = user["id"]
-            username = user["username"]
-            
-            # Используем встроенный метод активации подписки (как при оплате)
-            email = VPNUtils.get_vpn_email(user_id)
-            
-            # Устанавливаем срок подписки (40 дней)
-            expiry_date = datetime.now() + timedelta(days=40)
-            expiry_str = expiry_date.strftime("%d.%m.%Y %H:%M")
-            
-            # Получаем chat объект для username
-            try:
-                chat = await bot.get_chat(user_id)
-                username = f"@{chat.username}" if chat.username else username
-            except:
-                pass
-            
-            # Проверяем, есть ли уже пользователь
-            if database.get_user(user_id):
-                # Обновляем подписку
-                database.update_expiry_date(user_id, expiry_str)
-                await message.answer(f"♻️ Обновлен пользователь {username} (ID: {user_id})")
-            else:
-                # Активируем подписку (имитируем успешную оплату)
-                await activate_subscription(user_id)
-                await message.answer(f"✅ Добавлен пользователь {username} (ID: {user_id})")
-            
-            restored_count += 1
-            
-        except Exception as e:
-            error_msg = f"❌ Ошибка при восстановлении {username} (ID: {user_id}): {str(e)}"
-            errors.append(error_msg)
-            print(error_msg)
-    
-    # Формируем итоговый отчет
-    result_message = (
-        f"🔚 Восстановление завершено!\n"
-        f"✅ Успешно: {restored_count}\n"
-        f"❌ Ошибок: {len(errors)}"
-    )
-    
-    if errors:
-        # Сохраняем ошибки в файл
-        error_file = DATA_DIR / "restore_errors.txt"
-        with open(error_file, "w", encoding="utf-8") as f:
-            f.write("\n".join(errors))
-        
-        # Отправляем файл с ошибками
-        doc = FSInputFile(error_file)
-        await message.answer_document(doc, caption=result_message)
-    else:
-        await message.answer(result_message)
-
-@dp.message(F.text == "Очистить всю базу данных")
-async def clear_database(message: types.Message):
-    chat_id = message.chat.id
-    if chat_id not in ADMIN_IDS:
-        return await message.answer("🚫 У вас нет доступа к этой команде.")
-    
-    # Запрашиваем подтверждение
-    confirm_markup = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✅ Да, очистить", callback_data="confirm_clear_db")],
-        [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_clear_db")]
-    ])
-    
-    await message.answer(
-        "⚠️ Вы уверены, что хотите полностью очистить базу данных?\n"
-        "Это действие невозможно отменить! Все пользователи будут удалены.",
-        reply_markup=confirm_markup
-    )
-
-@dp.callback_query(F.data == "confirm_clear_db")
-async def confirm_clear_db(callback: types.CallbackQuery):
-    try:
-        # Получаем текущее количество пользователей
-        users_count = len(database.get_all_users())
-        
-        # Очищаем базу данных
-        database.clear_all_users()
-        
-        await callback.message.edit_text(
-            f"✅ База данных полностью очищена!\n"
-            f"🗑 Удалено пользователей: {users_count}"
-        )
-        await callback.answer()
-    except Exception as e:
-        await callback.message.edit_text(f"❌ Ошибка при очистке БД: {str(e)}")
-        await callback.answer()
-
-@dp.callback_query(F.data == "cancel_clear_db")
-async def cancel_clear_db(callback: types.CallbackQuery):
-    await callback.message.edit_text("❌ Очистка базы данных отменена")
-    await callback.answer()
 
 async def start_bot():
     asyncio.create_task(simulate_activity())
