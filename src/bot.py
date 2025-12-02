@@ -9,6 +9,7 @@ from aiogram.filters import StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import FSInputFile, InlineKeyboardButton, InlineKeyboardMarkup
+from pathlib import Path
 
 from api_requests import VPNApi
 from config import (
@@ -29,6 +30,30 @@ from services.payment_service import PaymentService
 from services.subscription_service import SubscriptionService
 from states import AdminState, EmailState
 from utils import VPNUtils
+
+LOG_DIR = Path(__file__).resolve().parent.parent / "logs"
+LOG_DIR.mkdir(exist_ok=True)
+LOG_FILE = LOG_DIR / "app.log"
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler(LOG_FILE, encoding="utf-8"),
+    ],
+)
+
+
+async def notify_admin(message: str):
+    """Отправляет уведомление первому админу (если задан)."""
+    if not ADMIN_IDS:
+        return
+    admin_id = ADMIN_IDS[0]
+    try:
+        await bot.send_message(admin_id, message)
+    except Exception as e:
+        logging.exception("Не удалось отправить уведомление админу: %s", e)
 
 
 class AdminOnlyMiddleware(BaseMiddleware):
@@ -156,6 +181,7 @@ async def create_payment(amount: float, chat_id: int, email: str):
         return payment_service.create_payment(amount, chat_id, email)
     except Exception as e:
         logging.exception("Ошибка создания платежа: %s", e)
+        await notify_admin(f"⚠️ Ошибка создания платежа для {chat_id}: {e}")
         return None, None
 
 
@@ -163,6 +189,41 @@ async def activate_subscription(chat_id: int):
     success = await subscription_service.activate_or_extend(chat_id, bot)
     if success:
         await how_to_use_auto(chat_id)
+
+
+async def sync_with_servers():
+    """Периодическая синхронизация с 3x-ui: обновляет сроки, удаляет пропавшие inbound."""
+    while True:
+        users = database.get_all_users()
+        deleted = 0
+        updated = 0
+
+        for user in users:
+            chat_id, username, expiry_date, _, _, inbound_id, server_url = user
+            server_data = vpn_api.get_inbound_data(inbound_id, server_url)
+
+            if not server_data:
+                database.remove_user_local(chat_id)
+                deleted += 1
+                continue
+
+            server_expiry_timestamp = server_data.get("expiryTime")
+            if not server_expiry_timestamp:
+                database.remove_user_local(chat_id)
+                deleted += 1
+                continue
+
+            server_expiry_date = datetime.fromtimestamp(server_expiry_timestamp / 1000)
+            server_expiry_str = VPNUtils.format_expiry_date(server_expiry_date)
+
+            if expiry_date != server_expiry_str:
+                database.update_expiry_date(chat_id, server_expiry_str)
+                updated += 1
+
+        logging.info("Sync with 3x-ui: updated=%s, deleted=%s", updated, deleted)
+        if deleted or updated:
+            await notify_admin(f"🔄 Синхронизация 3x-ui: обновлено {updated}, удалено {deleted}.")
+        await asyncio.sleep(1800)
 
 
 async def handle_activation_with_retries(chat_id: int):
@@ -284,7 +345,7 @@ async def process_email(message: types.Message, state: FSMContext):
     
     await state.clear()
 
-    amount = 1
+    amount = 149
     payment_id, payment_link = await create_payment(amount, message.chat.id, email)
     if not payment_id or not payment_link:
         return await message.answer("❌ Не удалось создать платеж. Попробуйте позже или свяжитесь с поддержкой.")
@@ -528,11 +589,11 @@ async def start_bot():
     if not MAINTENANCE_MODE:
         asyncio.create_task(check_payment_status())
         asyncio.create_task(check_subscriptions())
+        asyncio.create_task(sync_with_servers())
     else:
         logging.info("MAINTENANCE_MODE enabled: skipping subscription/payment background tasks.")
     await dp.start_polling(bot, skip_updates=True)
 
 if __name__ == "__main__":
     import asyncio
-    logging.basicConfig(level=logging.INFO)
     asyncio.new_event_loop().run_until_complete(start_bot())

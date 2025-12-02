@@ -139,6 +139,11 @@ class VPNDatabase:
                 print(f"❌ Не удалось удалить пользователя {chat_id} с сервера.")
         return False
 
+    def remove_user_local(self, chat_id):
+        """Удаляет запись из БД без запроса к 3x-ui (используется, если inbound уже пропал)."""
+        self.execute_query("DELETE FROM users WHERE chat_id=%s", (chat_id,))
+        return True
+
     def mark_reminder_sent(self, chat_id):
         self.execute_query("UPDATE users SET reminder_sent = TRUE WHERE chat_id=%s", (chat_id,))
 
