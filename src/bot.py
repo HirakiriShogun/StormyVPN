@@ -494,7 +494,7 @@ async def process_add_user_username(message: types.Message, state: FSMContext):
         return
 
     if vless_key:
-        expiry_date = VPNUtils.format_expiry_date(datetime.now() + timedelta(days=365))
+        expiry_date = VPNUtils.format_expiry_date(datetime.now() + timedelta(days=31))
         
         database.add_user(user_id, username, vless_key, expiry_date, inbound_id, server_url)
         await message.answer(f"✅ Пользователь {username} (ID: {user_id}) успешно добавлен!", reply_markup=get_admin_keyboard())
