@@ -1,0 +1,18 @@
+services:
+  db:
+    image: postgres:15
+    container_name: stormyvpn-db
+    restart: always
+    env_file: .env
+    environment:
+      POSTGRES_DB: ${DB_NAME}
+      POSTGRES_USER: ${DB_USER}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+    volumes:
+      - db_data:/var/lib/postgresql/data
+      - ./docker/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    ports:
+      - "5433:5432"
+
+volumes:
+  db_data:
