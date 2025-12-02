@@ -582,6 +582,71 @@ async def process_broadcast_message(message: types.Message, state: FSMContext):
     await state.clear()
 
     await message.answer(f"✅ Сообщение отправлено {sent_count} пользователям.\n❌ Не удалось отправить {failed_count}.")
+
+
+@dp.message(F.text == "Послать подарки 🎁")
+async def ask_for_gift_days(message: types.Message, state: FSMContext):
+    if message.chat.id not in ADMIN_IDS:
+        return await message.answer("🚫 У вас нет доступа.")
+    await message.answer("🎁 На сколько дней продлить подписку всем пользователям? Введите число.")
+    await state.set_state(AdminState.awaiting_gift_days)
+
+
+@dp.message(StateFilter(AdminState.awaiting_gift_days))
+async def process_gift_days(message: types.Message, state: FSMContext):
+    chat_id = message.chat.id
+    try:
+        days = int(message.text)
+        if days <= 0:
+            raise ValueError
+    except ValueError:
+        return await message.answer("🚫 Введите положительное число дней.")
+
+    await state.clear()
+    await message.answer(f"🎁 Продлеваем подписку всем на {days} дней... Это может занять пару минут.")
+    asyncio.create_task(add_days_to_all_users(days, chat_id))
+
+
+async def add_days_to_all_users(days: int, notify_chat: int):
+    users = database.get_all_users()
+    updated = 0
+    failed = 0
+    skipped = 0
+
+    for user in users:
+        chat_id, username, expiry_date, _, _, inbound_id, server_url = user
+        server_data = vpn_api.get_inbound_data(inbound_id, server_url)
+
+        if not server_data or "expiryTime" not in server_data:
+            skipped += 1
+            continue
+
+        server_expiry_timestamp = server_data["expiryTime"]
+        server_expiry_date = datetime.fromtimestamp(server_expiry_timestamp / 1000)
+        new_expiry_date = server_expiry_date + timedelta(days=days)
+        new_expiry_timestamp = int(new_expiry_date.timestamp() * 1000)
+
+        try:
+            is_renewed = vpn_api.renew_vpn(inbound_id, server_url, new_expiry_timestamp)
+        except Exception as e:
+            logging.exception("Ошибка продления при подарке для %s: %s", chat_id, e)
+            is_renewed = False
+
+        if is_renewed:
+            new_expiry_str = new_expiry_date.strftime("%d.%m.%Y %H:%M")
+            database.update_expiry_date(chat_id, new_expiry_str)  # сбрасывает reminder_sent в 0
+            updated += 1
+        else:
+            failed += 1
+
+    summary = (
+        f"🎁 Подарок завершён.\n"
+        f"✅ Продлено: {updated}\n"
+        f"❌ Ошибок: {failed}\n"
+        f"⏭️ Пропущено (нет inbound): {skipped}"
+    )
+    await bot.send_message(notify_chat, summary)
+    await notify_admin(summary)
     
 
 async def start_bot():
