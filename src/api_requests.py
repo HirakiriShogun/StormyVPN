@@ -6,7 +6,7 @@ import random
 import uuid
 import time
 from datetime import datetime, timedelta
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 
 from config import SERVERS
 
@@ -16,7 +16,7 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 SESSION_COOKIE_NAME = 'session'
 
 class VPNApi:
-    def __init__(self, servers: List[Dict[str, Any]] | None = None):
+    def __init__(self, servers: Optional[List[Dict[str, Any]]] = None):
         self.session = requests.Session()
         self.active_server = None
         self.session_cookie = None
