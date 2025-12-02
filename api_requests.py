@@ -1,0 +1,476 @@
+
+import requests
+import json
+import urllib3
+import random
+import uuid
+import time
+from datetime import datetime, timedelta
+
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+SERVERS = [
+    {"url": "https://38.135.53.154:55555/v9y6CFQiVz", "username": "HirakiriShogun", "password": "demos1110", "max_quantity": 50},
+    {"url": "https://38.135.53.215:5278/XRp51tK8il0WdQ9", "username": "HirakiriShogun", "password": "demos1110", "max_quantity": 50},
+]
+
+
+SESSION_COOKIE_NAME = 'session'
+
+class VPNApi:
+    def __init__(self):
+        self.session = requests.Session()
+        self.active_server = None
+        self.session_cookie = None
+
+    def authenticate_server(self, server):
+        login_data = {"username": server["username"], "password": server["password"]}
+        try:
+            response = self.session.post(f"{server['url']}/login/", data=login_data, verify=False)
+            if response.status_code == 200:
+                self.session_cookie = response.cookies.get(SESSION_COOKIE_NAME)
+                return True
+            print(f"Login failed on {server['url']}: {response.status_code} - {response.text}")
+        except Exception as e:
+            print(f"Error during authentication {server['url']}: {e}")
+        return False
+
+    def check_server_load(self, server):
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "Cookie": f"{SESSION_COOKIE_NAME}={self.session_cookie}"
+        }
+        try:
+            response = self.session.get(f"{server['url']}/panel/api/inbounds/list/", headers=headers, verify=False)
+            if response.status_code == 200:
+                data = response.json()
+                if data["success"]:
+                    total_clients = sum(len(inbound["clientStats"]) for inbound in data["obj"])
+                    return total_clients / server["max_quantity"]
+            print(f"Error fetching client list from {server['url']}: {response.text}")
+        except Exception as e:
+            print(f"Error during server check {server['url']}: {e}")
+        return float('inf')
+
+    def select_server(self):
+        best_server = None
+        min_load = float('inf')
+
+        for server in SERVERS:
+            if self.authenticate_server(server):
+                load = self.check_server_load(server)
+                if load < min_load:
+                    min_load = load
+                    best_server = server
+
+        if best_server:
+            print(f"Selected server: {best_server['url']}")
+            self.active_server = best_server
+
+    def buy_vpn(self, email, admin):
+        if not self.active_server:
+            print("No active server available.")
+            return None
+
+        client_id = str(uuid.uuid4())
+        sub_id = ''.join(random.choices('abcdefghijklmnopqrstuvwxyz0123456789', k=16))
+        port = random.randint(10000, 60000)
+
+        days_to_add = 365 if admin else 30
+        expiry_time = int(time.time() * 1000) + (days_to_add * 24 * 60 * 60 * 1000)
+        short_id = hex(random.randint(0, 2**32 - 1))[2:].zfill(8)
+        client_data = {
+            "up": 0,
+            "down": 0,
+            "total": 0,
+            "remark": "",
+            "enable": True,
+            "expiryTime": expiry_time,
+            "listen": "",
+            "port": port,
+            "protocol": "vless",
+            "settings": json.dumps({
+                "clients": [{
+                    "id": client_id,
+                    "flow": "",
+                    "email": email,
+                    "limitIp": 0,
+                    "totalGB": 0,
+                    "expiryTime": 0,
+                    "enable": True,
+                    "tgId": "",
+                    "subId": sub_id,
+                    "reset": 0
+                }],
+                "decryption": "none",
+                "fallbacks": []
+            }),
+            "streamSettings": json.dumps({
+                "network": "tcp",
+                "security": "reality",
+                "externalProxy": [],
+                "realitySettings": {
+                    "show": False,
+                    "xver": 0,
+                    "dest": "yahoo.com:443",
+                    "serverNames": ["yahoo.com", "www.yahoo.com"],
+                    "privateKey": "wIc7zBUiTXBGxM7S7wl0nCZ663OAvzTDNqS7-bsxV3A",
+                    "shortIds": [short_id],
+                    "settings": {
+                        "publicKey": "2UqLjQFhlvLcY7VzaKRotIDQFOgAJe1dYD1njigp9wk",
+                        "fingerprint": "random",
+                        "serverName": "yahoo.com",
+                        "spiderX": "/"
+                    }
+                },
+                "tcpSettings": {
+                    "acceptProxyProtocol": False,
+                    "header": {"type": "none"}
+                }
+            })
+        }
+        
+        try:
+            response = self.session.post(f"{self.active_server['url']}/panel/api/inbounds/add/",
+                                         json=client_data, verify=False)
+            if response.status_code == 200:
+                status_obj = response.json()["msg"]
+                print(status_obj)
+                if status_obj == "Create Successfully":
+                    client_obj = response.json()["obj"]
+                    return self.generate_vless_key(client_obj, short_id)
+                elif status_obj == "Inbound has been successfully created.":
+                    client_obj = response.json()["obj"]
+                    return self.generate_vless_key(client_obj, short_id)
+            else:
+                print(f"Failed to add client: {response.status_code} - {response.text}")
+                return None
+        except Exception as e:
+            print(f"Error during client creation: {e}")
+            return None
+
+    def generate_vless_key(self, client_obj, short_id):
+        inbound_id = client_obj["id"]
+        server_url = self.active_server['url']
+        settings = json.loads(client_obj["settings"])
+        client_id = settings["clients"][0]["id"]
+        server = self.active_server["url"].split("//")[1].split(":")[0]
+        port = int(client_obj["port"])
+        return (f"vless://{client_id}@{server}:{port}?type=tcp&security=reality&"
+                f"pbk=2UqLjQFhlvLcY7VzaKRotIDQFOgAJe1dYD1njigp9wk&fp=random&"
+                f"sni=yahoo.com&sid={short_id}&spx=%2F#New-{settings['clients'][0]['subId']}", inbound_id, server_url)
+
+    def remove_user(self, inbound_id, server_url):
+        server = next((s for s in SERVERS if s["url"] == server_url), None)
+        
+        if not server:
+            print(f"Сервер с URL {server_url} не найден в списке.")
+            return None
+
+        if not self.authenticate_server(server):
+            print(f"Не удалось авторизоваться на сервере {server_url}.")
+            return None
+
+        try:
+            url = f"{server['url']}/panel/api/inbounds/del/{inbound_id}/"
+            delete_response = self.session.post(url, verify=False)
+            
+            if delete_response.status_code == 200:
+                print(f"Пользователь с inbound_id {inbound_id} успешно удалён с {server_url}")
+                return delete_response.json()
+            else:
+                print(f"Ошибка удаления пользователя {inbound_id}: {delete_response.status_code} - {delete_response.text}")
+                return None
+        except Exception as e:
+            print(f"Ошибка при удалении пользователя {inbound_id} с {server_url}: {e}")
+            return None
+        
+    def renew_vpn(self, inbound_id, server_url, new_expiry_time):
+        server = next((s for s in SERVERS if s["url"] == server_url), None)
+        if not server:
+            print(f"❌ Ошибка: Сервер {server_url} не найден!")
+            return False
+
+        if not self.authenticate_server(server):
+            print(f"❌ Ошибка авторизации на сервере {server_url}. Продление невозможно.")
+            return False
+
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "Cookie": f"{SESSION_COOKIE_NAME}={self.session_cookie}"
+        }
+
+        try:
+            # Получаем текущие данные inbound
+            response = self.session.get(
+                f"{server['url']}/panel/api/inbounds/get/{inbound_id}/",
+                headers=headers, verify=False
+            )
+
+            if response.status_code != 200:
+                print(f"❌ Ошибка получения inbound: {response.status_code} - {response.text}")
+                return False
+
+            inbound_data = response.json().get("obj")
+            if not inbound_data:
+                print("❌ Не удалось получить inbound данные!")
+                return False
+
+            # Обновляем ключевые поля
+            inbound_data["expiryTime"] = new_expiry_time
+            inbound_data["enable"] = True
+
+            # Обновляем settings.clients[0].enable = True
+            settings = json.loads(inbound_data.get("settings", "{}"))
+            if "clients" in settings and isinstance(settings["clients"], list) and settings["clients"]:
+                settings["clients"][0]["enable"] = True
+            inbound_data["settings"] = json.dumps(settings)
+
+            # Обновляем объект на сервере
+            update_response = self.session.post(
+                f"{server['url']}/panel/api/inbounds/update/{inbound_id}/",
+                json=inbound_data, headers=headers, verify=False
+            )
+
+            if update_response.status_code == 200:
+                result = update_response.json()
+                if result.get("msg") in ["Update Successfully", "Inbound has been successfully updated."]:
+                    print(f"✅ Подписка обновлена! Новый срок: {datetime.fromtimestamp(new_expiry_time / 1000)}")
+                    return True
+                else:
+                    print(f"❌ Ошибка продления подписки: {result.get('msg')}")
+            else:
+                print(f"❌ Ошибка обновления: {update_response.status_code} - {update_response.text}")
+
+        except Exception as e:
+            print(f"❌ Ошибка при обновлении подписки: {e}")
+
+        return False
+
+    def get_inbound_data(self, inbound_id, server_url):
+        server = next((s for s in SERVERS if s["url"] == server_url), None)
+        if not server:
+            print(f"❌ Ошибка: Сервер {server_url} не найден!")
+            return None
+
+        if not self.authenticate_server(server):
+            print(f"❌ Ошибка авторизации на сервере {server_url}.")
+            return None
+
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "Cookie": f"{SESSION_COOKIE_NAME}={self.session_cookie}"
+        }
+
+        try:
+            response = self.session.get(
+                f"{server['url']}/panel/api/inbounds/get/{inbound_id}/",
+                headers=headers, verify=False
+            )
+
+            if response.status_code != 200:
+                print(f"❌ Ошибка получения inbound: {response.status_code} - {response.text}")
+                return None
+
+            inbound_data = response.json().get("obj")
+            if not inbound_data:
+                print(f"❌ inbound_id {inbound_id} не найден!")
+                return None
+
+            return inbound_data  # Возвращаем актуальные данные
+        except Exception as e:
+            print(f"❌ Ошибка при запросе inbound: {e}")
+            return None
+        
+    def scan_all_inbounds(self, server_url):
+        """Сканирует все возможные inbound_id на сервере (от 50 до 210)"""
+        server = next((s for s in SERVERS if s["url"] == server_url), None)
+        if not server:
+            print(f"❌ Ошибка: Сервер {server_url} не найден!")
+            return []
+
+        if not self.authenticate_server(server):
+            print(f"❌ Ошибка авторизации на сервере {server_url}.")
+            return []
+
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "Cookie": f"{SESSION_COOKIE_NAME}={self.session_cookie}"
+        }
+
+        found_inbounds = []
+        
+        for inbound_id in range(50, 211):  # от 50 до 210 включительно
+            try:
+                response = self.session.get(
+                    f"{server['url']}/panel/api/inbounds/get/{inbound_id}/",
+                    headers=headers, 
+                    verify=False,
+                    timeout=5
+                )
+
+                if response.status_code == 200:
+                    inbound_data = response.json()
+                    if inbound_data.get("success", False) and "obj" in inbound_data:
+                        print(f"✅ Найден валидный inbound с ID: {inbound_id}")
+                        found_inbounds.append(inbound_data["obj"])
+                    else:
+                        print(f"ℹ️ ID {inbound_id} - невалидные данные: {inbound_data}")
+                elif response.status_code == 404:
+                    continue
+                else:
+                    print(f"⚠️ ID {inbound_id} - ошибка {response.status_code}: {response.text}")
+
+            except requests.exceptions.RequestException as e:
+                print(f"⚠️ Ошибка запроса для ID {inbound_id}: {e}")
+                continue
+            except Exception as e:
+                print(f"⚠️ Неожиданная ошибка для ID {inbound_id}: {e}")
+                continue
+
+        print(f"🔚 Найдено inbounds: {len(found_inbounds)}")
+        return found_inbounds
+
+    def get_user_data_from_inbound(self, inbound_data, server_url):
+        """Получает данные пользователя из данных inbound"""
+        if not inbound_data:
+            print("❌ Пустые inbound_data")
+            return None
+
+        try:
+            inbound_id = inbound_data.get("id")
+            print(f"🔍 Обрабатываем inbound ID: {inbound_id}")
+            
+            # Проверяем settings
+            settings_str = inbound_data.get("settings")
+            if not settings_str:
+                print(f"❌ Inbound {inbound_id} не содержит settings")
+                return None
+                
+            try:
+                settings = json.loads(settings_str)
+            except json.JSONDecodeError:
+                print(f"❌ Inbound {inbound_id} содержит невалидные settings")
+                return None
+
+            # Проверяем clients
+            clients = settings.get("clients")
+            if not clients or not isinstance(clients, list):
+                print(f"❌ Inbound {inbound_id} не содержит clients")
+                return None
+
+            # Берем первого клиента
+            client = clients[0]
+            if not isinstance(client, dict):
+                print(f"❌ Inbound {inbound_id} содержит невалидного клиента")
+                return None
+
+            # Проверяем email
+            email = client.get("email")
+            if not email or not isinstance(email, str):
+                print(f"❌ Inbound {inbound_id} содержит невалидный email")
+                return None
+
+            # Извлекаем chat_id из email (новый формат: user_123456789@stormyvpn.com)
+            try:
+                # Разбираем email формата user_123456789@stormyvpn.com
+                if email.startswith("user_") and "@stormyvpn.com" in email:
+                    user_part = email.split("@")[0]  # user_123456789
+                    chat_id = int(user_part.split("_")[1])  # 123456789
+                    print(f"ℹ️ Извлечен chat_id: {chat_id} из email: {email}")
+                else:
+                    print(f"❌ Inbound {inbound_id} содержит email в неожиданном формате: {email}")
+                    return None
+
+            except (ValueError, IndexError) as e:
+                print(f"❌ Ошибка извлечения chat_id из email: {email}, ошибка: {e}")
+                return None
+
+            # Обрабатываем expiryTime - сначала проверяем в клиенте, потом в основном inbound
+            expiry_time = client.get("expiryTime", inbound_data.get("expiryTime", 0))
+            
+            # Если expiry_time равно 0, устанавливаем дефолтное значение (текущая дата + 30 дней)
+            if expiry_time == 0:
+                expiry_time = int((datetime.now() + timedelta(days=30)).timestamp() * 1000)
+                print(f"⚠️ Для inbound {inbound_id} установлена дефолтная дата окончания подписки")
+            
+            try:
+                expiry_date = datetime.fromtimestamp(expiry_time / 1000)
+                expiry_str = expiry_date.strftime("%d.%m.%Y %H:%M")
+                print(f"ℹ️ Дата окончания подписки: {expiry_str}")
+            except Exception as e:
+                print(f"❌ Ошибка обработки expiryTime: {e}")
+                # Устанавливаем дефолтную дату при ошибке
+                expiry_date = datetime.now() + timedelta(days=30)
+                expiry_str = expiry_date.strftime("%d.%m.%Y %H:%M")
+
+            # Генерируем VLESS ключ
+            try:
+                stream_settings_str = inbound_data.get("streamSettings")
+                if not stream_settings_str:
+                    print(f"❌ Inbound {inbound_id} не содержит streamSettings")
+                    return None
+
+                stream_settings = json.loads(stream_settings_str)
+                reality_settings = stream_settings.get("realitySettings", {})
+                short_ids = reality_settings.get("shortIds", [])
+                short_id = short_ids[0] if short_ids else ""
+
+                server_host = server_url.split("//")[1].split(":")[0]
+                port = inbound_data.get("port", 0)
+                client_id = client.get("id", "")
+
+                vless_key = (
+                    f"vless://{client_id}@{server_host}:{port}?type=tcp&security=reality&"
+                    f"pbk=2UqLjQFhlvLcY7VzaKRotIDQFOgAJe1dYD1njigp9wk&fp=random&"
+                    f"sni=yahoo.com&sid={short_id}&spx=%2F#New-{client.get('subId', '')}"
+                )
+            except Exception as e:
+                print(f"❌ Ошибка генерации VLESS ключа: {e}")
+                return None
+
+            print(f"✅ Успешно обработан inbound {inbound_id} для пользователя {email}")
+            return {
+                "chat_id": chat_id,
+                "email": email,
+                "expiry_date": expiry_str,
+                "vless_key": vless_key,
+                "inbound_id": inbound_id,
+                "server_url": server_url
+            }
+
+        except Exception as e:
+            print(f"❌ Критическая ошибка обработки inbound: {e}")
+            return None
+
+    def restore_all_users_bruteforce(self):
+        """Восстанавливает пользователей методом перебора всех возможных ID"""
+        restored_users = []
+        
+        for server in SERVERS:
+            print(f"\n🔍 Начинаем сканирование сервера: {server['url']}")
+            
+            inbounds = self.scan_all_inbounds(server["url"])
+            if not inbounds:
+                print(f"ℹ️ На сервере {server['url']} не найдено inbounds")
+                continue
+                
+            print(f"✅ На сервере {server['url']} найдено {len(inbounds)} inbounds")
+            
+            for inbound in inbounds:
+                user_data = self.get_user_data_from_inbound(inbound, server["url"])
+                if user_data:
+                    print(f"👤 Найден пользователь: {user_data['email']}")
+                    restored_users.append(user_data)
+                else:
+                    print(f"ℹ️ Inbound {inbound.get('id', 'unknown')} не содержит валидных данных")
+        
+        print(f"\n🔚 Всего восстановлено пользователей: {len(restored_users)}")
+        if restored_users:
+            print("Пример восстановленного пользователя:", restored_users[0])
+        return restored_users
+
