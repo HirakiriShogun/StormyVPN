@@ -18,12 +18,19 @@ export PGPASSWORD
 DATE_STR="$(date +%F_%H-%M-%S)"
 OUT_FILE="$BACKUP_DIR/stormyvpn_${DATE_STR}.sql"
 
-pg_dump \
-  -h "${DB_HOST:-localhost}" \
-  -p "${DB_PORT:-5433}" \
-  -U "${DB_USER:-stormy}" \
-  -d "${DB_NAME:-stormyvpn}" \
-  > "$OUT_FILE"
+if command -v pg_dump >/dev/null 2>&1; then
+  pg_dump \
+    -h "${DB_HOST:-localhost}" \
+    -p "${DB_PORT:-5433}" \
+    -U "${DB_USER:-stormy}" \
+    -d "${DB_NAME:-stormyvpn}" \
+    > "$OUT_FILE"
+else
+  # fallback: run pg_dump inside the running Postgres container
+  CONTAINER_NAME="${DB_CONTAINER:-stormyvpn-db}"
+  docker exec -i "$CONTAINER_NAME" env PGPASSWORD="$PGPASSWORD" \
+    pg_dump -U "${DB_USER:-stormy}" -d "${DB_NAME:-stormyvpn}" > "$OUT_FILE"
+fi
 
 # Optionally prune backups older than 30 days
 find "$BACKUP_DIR" -type f -name "stormyvpn_*.sql" -mtime +30 -delete
