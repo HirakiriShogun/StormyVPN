@@ -57,10 +57,11 @@ async def notify_admin(message: str):
 
 
 class AdminOnlyMiddleware(BaseMiddleware):
-    def __init__(self, admins: list[int], maintenance_contact: str):
+    def __init__(self, admins: list[int], maintenance_contact: str, maintenance_mode: bool):
         super().__init__()
         self.admins = set(admins)
         self.maintenance_contact = maintenance_contact
+        self.maintenance_mode = maintenance_mode
 
     async def __call__(
         self,
@@ -68,6 +69,10 @@ class AdminOnlyMiddleware(BaseMiddleware):
         event: Any,
         data: dict[str, Any],
     ) -> Any:
+        # Если нет режима техработ — пропускаем всех
+        if not self.maintenance_mode:
+            return await handler(event, data)
+
         chat_id = None
         if isinstance(event, types.Message):
             chat_id = event.chat.id
@@ -108,7 +113,7 @@ bot = Bot(token=API_TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
 storage = MemoryStorage()
 dp = Dispatcher()
 
-admin_middleware = AdminOnlyMiddleware(ADMIN_IDS, MAINTENANCE_CONTACT)
+admin_middleware = AdminOnlyMiddleware(ADMIN_IDS, MAINTENANCE_CONTACT, MAINTENANCE_MODE)
 dp.message.middleware.register(admin_middleware)
 dp.callback_query.middleware.register(admin_middleware)
 
