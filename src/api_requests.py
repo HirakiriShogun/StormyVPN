@@ -255,40 +255,61 @@ class VPNApi:
         return False
 
     def get_inbound_data(self, inbound_id, server_url):
+        """Возвращает inbound данные или словарь с ключами _error/_not_found."""
         server = next((s for s in self.servers if s["url"] == server_url), None)
         if not server:
             print(f"❌ Ошибка: Сервер {server_url} не найден!")
-            return None
+            return {"_error": "server_not_configured"}
 
         if not self.authenticate_server(server):
             print(f"❌ Ошибка авторизации на сервере {server_url}.")
-            return None
+            return {"_error": "auth_failed"}
 
         headers = {
             "Content-Type": "application/json",
             "Accept": "application/json",
-            "Cookie": f"{SESSION_COOKIE_NAME}={self.session_cookie}"
+            "Cookie": f"{SESSION_COOKIE_NAME}={self.session_cookie}",
         }
 
         try:
             response = self.session.get(
                 f"{server['url']}/panel/api/inbounds/get/{inbound_id}/",
-                headers=headers, verify=False
+                headers=headers,
+                verify=False,
+                timeout=10,
             )
-
-            if response.status_code != 200:
-                print(f"❌ Ошибка получения inbound: {response.status_code} - {response.text}")
-                return None
-
-            inbound_data = response.json().get("obj")
-            if not inbound_data:
-                print(f"❌ inbound_id {inbound_id} не найден!")
-                return None
-
-            return inbound_data  # Возвращаем актуальные данные
-        except Exception as e:
+        except requests.exceptions.RequestException as e:
             print(f"❌ Ошибка при запросе inbound: {e}")
-            return None
+            return {"_error": f"request_error: {e}"}
+        except Exception as e:
+            print(f"❌ Неизвестная ошибка при запросе inbound: {e}")
+            return {"_error": f"unexpected_error: {e}"}
+
+        if response.status_code == 404:
+            print(f"❌ inbound_id {inbound_id} не найден на {server_url}")
+            return {"_not_found": True}
+        if response.status_code != 200:
+            print(f"❌ Ошибка получения inbound: {response.status_code} - {response.text}")
+            return {"_error": f"status_{response.status_code}"}
+
+        try:
+            inbound_data = response.json()
+        except ValueError:
+            print("❌ Ошибка: невалидный JSON при получении inbound")
+            return {"_error": "invalid_json"}
+
+        if not inbound_data.get("success", False):
+            print(f"❌ Ошибка API при получении inbound: {inbound_data}")
+            if "not found" in str(inbound_data).lower():
+                return {"_not_found": True}
+            return {"_error": "api_error"}
+
+        inbound_obj = inbound_data.get("obj")
+        if not inbound_obj:
+            print("❌ Ошибка: объект inbound пустой!")
+            return {"_error": "empty_response"}
+
+        return inbound_obj  # Возвращаем актуальные данные
         
     def scan_all_inbounds(self, server_url):
         """Сканирует все возможные inbound_id на сервере (от 50 до 210)"""

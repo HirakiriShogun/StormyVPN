@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 from typing import Any, Awaitable, Callable
 
 from aiogram import BaseMiddleware, Bot, Dispatcher, F, types
-from aiogram.filters import StateFilter
+from aiogram.filters import CommandStart, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import FSInputFile, InlineKeyboardButton, InlineKeyboardMarkup
@@ -207,15 +207,29 @@ async def sync_with_servers():
             chat_id, username, expiry_date, _, _, inbound_id, server_url = user
             server_data = vpn_api.get_inbound_data(inbound_id, server_url)
 
-            if not server_data:
+            # Если запрос упал по сети/авторизации — не трогаем запись, просто логируем и продолжаем
+            if not server_data or server_data.get("_error"):
+                logging.warning(
+                    "Skip sync for chat_id=%s inbound_id=%s: %s",
+                    chat_id,
+                    inbound_id,
+                    server_data.get("_error") if isinstance(server_data, dict) else "no data",
+                )
+                continue
+
+            # Явно удаляем только если сервер подтвердил, что inbound не найден
+            if server_data.get("_not_found"):
                 database.remove_user_local(chat_id)
                 deleted += 1
                 continue
 
             server_expiry_timestamp = server_data.get("expiryTime")
             if not server_expiry_timestamp:
-                database.remove_user_local(chat_id)
-                deleted += 1
+                logging.warning(
+                    "Skip sync expiry update for chat_id=%s inbound_id=%s: no expiryTime",
+                    chat_id,
+                    inbound_id,
+                )
                 continue
 
             server_expiry_date = datetime.fromtimestamp(server_expiry_timestamp / 1000)
@@ -303,7 +317,7 @@ async def how_to_use_auto(chat_id):
 
 
 
-@dp.message(F.text == "/start")
+@dp.message(CommandStart())
 async def start_message(message: types.Message):
     chat_id = message.chat.id
     
@@ -325,6 +339,10 @@ async def start_message(message: types.Message):
     status = database.get_subscription_status(chat_id)
     reply_kb = get_main_keyboard(status, chat_id in ADMIN_IDS)
     await bot.send_photo(chat_id, photo, caption=welcome_text, reply_markup=reply_kb)
+    
+@dp.message(F.text.regexp(r"^(?i)(start|старт)$"))
+async def start_aliases(message: types.Message):
+    await start_message(message)
     
 @dp.message(F.text.in_(["Оформить VPN 💳", "Продлить VPN 🔑"]))
 async def ask_for_email(message: types.Message, state: FSMContext):
@@ -622,7 +640,11 @@ async def add_days_to_all_users(days: int, notify_chat: int):
         chat_id, username, expiry_date, _, _, inbound_id, server_url = user
         server_data = vpn_api.get_inbound_data(inbound_id, server_url)
 
-        if not server_data or "expiryTime" not in server_data:
+        if not server_data or server_data.get("_error"):
+            skipped += 1
+            continue
+
+        if server_data.get("_not_found") or "expiryTime" not in server_data:
             skipped += 1
             continue
 
