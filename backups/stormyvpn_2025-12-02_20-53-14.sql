@@ -2,13 +2,14 @@
 -- PostgreSQL database dump
 --
 
+\restrict Us5cg3Z9crv6Cjf3ifpDxyT14K9Zt4QgzshMcVecp3tEbXqhcJBrcomHrTlzPpo
+
 -- Dumped from database version 15.15 (Debian 15.15-1.pgdg13+1)
--- Dumped by pg_dump version 17.2
+-- Dumped by pg_dump version 15.15 (Debian 15.15-1.pgdg13+1)
 
 SET statement_timeout = 0;
 SET lock_timeout = 0;
 SET idle_in_transaction_session_timeout = 0;
-SET transaction_timeout = 0;
 SET client_encoding = 'UTF8';
 SET standard_conforming_strings = on;
 SELECT pg_catalog.set_config('search_path', '', false);
@@ -140,4 +141,6 @@ ALTER TABLE ONLY public.users
 --
 -- PostgreSQL database dump complete
 --
+
+\unrestrict Us5cg3Z9crv6Cjf3ifpDxyT14K9Zt4QgzshMcVecp3tEbXqhcJBrcomHrTlzPpo
 
