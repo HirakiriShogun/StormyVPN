@@ -15,6 +15,9 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 SESSION_COOKIE_NAME = 'session'
 
+def _normalize_url(url: str) -> str:
+    return url.rstrip('/') if url else url
+
 class VPNApi:
     def __init__(self, servers: Optional[List[Dict[str, Any]]] = None):
         self.session = requests.Session()
@@ -62,10 +65,15 @@ class VPNApi:
         min_load = float('inf')
 
         for server in self.servers:
+            server = server.copy()
+            server["url"] = _normalize_url(server["url"])
             if self.authenticate_server(server):
                 load = self.check_server_load(server)
                 if load < min_load:
                     min_load = load
+                    best_server = server
+                elif best_server is None:
+                    # Если это первый успешно авторизованный сервер, сохраняем его даже при невозможности расчета нагрузки
                     best_server = server
 
         if best_server:
@@ -168,7 +176,8 @@ class VPNApi:
                 f"sni=yahoo.com&sid={short_id}&spx=%2F#New-{settings['clients'][0]['subId']}", inbound_id, server_url)
 
     def remove_user(self, inbound_id, server_url):
-        server = next((s for s in self.servers if s["url"] == server_url), None)
+        target_url = _normalize_url(server_url)
+        server = next((s for s in self.servers if _normalize_url(s["url"]) == target_url), None)
         
         if not server:
             print(f"Сервер с URL {server_url} не найден в списке.")
@@ -193,7 +202,8 @@ class VPNApi:
             return None
         
     def renew_vpn(self, inbound_id, server_url, new_expiry_time):
-        server = next((s for s in self.servers if s["url"] == server_url), None)
+        target_url = _normalize_url(server_url)
+        server = next((s for s in self.servers if _normalize_url(s["url"]) == target_url), None)
         if not server:
             print(f"❌ Ошибка: Сервер {server_url} не найден!")
             return False
@@ -257,7 +267,8 @@ class VPNApi:
 
     def get_inbound_data(self, inbound_id, server_url):
         """Возвращает inbound данные или словарь с ключами _error/_not_found."""
-        server = next((s for s in self.servers if s["url"] == server_url), None)
+        target_url = _normalize_url(server_url)
+        server = next((s for s in self.servers if _normalize_url(s["url"]) == target_url), None)
         if not server:
             print(f"❌ Ошибка: Сервер {server_url} не найден!")
             return {"_error": "server_not_configured"}
