@@ -30,7 +30,6 @@ class VPNApi:
 
     def authenticate_server(self, server):
         login_data = {"username": server["username"], "password": server["password"]}
-        logger.info("Auth: trying %s as %s", server["url"], server["username"])
         print(f"[auth] try {server['url']} as {server['username']}")
         try:
             login_url = f"{server['url']}/login/"
@@ -38,15 +37,8 @@ class VPNApi:
             response = self.session.post(
                 login_url, data=login_data, verify=False, timeout=15
             )
-            logger.info(
-                "Auth (urlencoded): %s status=%s cookies=%s",
-                server["url"],
-                response.status_code,
-                list(response.cookies.keys()),
-            )
             print(f"[auth-urlencoded] {server['url']} status={response.status_code} cookies={list(response.cookies.keys())}")
             if response.text:
-                logger.debug("Auth body (%s): %s", server["url"], response.text[:500])
                 print(f"[auth-urlencoded-body] {response.text[:200]}")
 
             cookie = response.cookies.get(SESSION_COOKIE_NAME)
@@ -60,15 +52,8 @@ class VPNApi:
             response2 = self.session.post(
                 login_url, files=files, verify=False, timeout=15
             )
-            logger.info(
-                "Auth (multipart): %s status=%s cookies=%s",
-                server["url"],
-                response2.status_code,
-                list(response2.cookies.keys()),
-            )
             print(f"[auth-multipart] {server['url']} status={response2.status_code} cookies={list(response2.cookies.keys())}")
             if response2.text:
-                logger.debug("Auth body2 (%s): %s", server["url"], response2.text[:500])
                 print(f"[auth-multipart-body] {response2.text[:200]}")
 
             cookie2 = response2.cookies.get(SESSION_COOKIE_NAME)
@@ -77,17 +62,8 @@ class VPNApi:
                 print(f"[auth] success multipart {server['url']} cookie={SESSION_COOKIE_NAME}")
                 return True
 
-            logger.error(
-                "Login failed on %s: status1=%s cookies1=%s status2=%s cookies2=%s",
-                server["url"],
-                response.status_code,
-                response.cookies.get_dict(),
-                response2.status_code,
-                response2.cookies.get_dict(),
-            )
             print(f"[auth-error] {server['url']} status1={response.status_code} cookies1={response.cookies.get_dict()} status2={response2.status_code} cookies2={response2.cookies.get_dict()}")
         except Exception as e:
-            logger.exception("Error during authentication %s: %s", server["url"], e)
             print(f"[auth-exception] {server['url']} error={e}")
         return False
 
@@ -119,14 +95,12 @@ class VPNApi:
         best_server = None
         min_load = float('inf')
 
-        logger.info("Select server: %s candidates", len(self.servers))
         print(f"[select] candidates={len(self.servers)}")
         for server in self.servers:
             server = server.copy()
             server["url"] = _normalize_url(server["url"])
             if self.authenticate_server(server):
                 load = self.check_server_load(server)
-                logger.info("Select server: %s load=%s", server["url"], load)
                 print(f"[select] {server['url']} load={load}")
                 if load < min_load:
                     min_load = load
@@ -136,11 +110,9 @@ class VPNApi:
                     best_server = server
 
         if best_server:
-            logger.info("Selected server: %s (load=%s)", best_server['url'], min_load)
             print(f"[select] selected {best_server['url']} load={min_load}")
             self.active_server = best_server
         else:
-            logger.error("Failed to authenticate any configured server.")
             print("[select-error] Failed to authenticate any configured server")
 
     def buy_vpn(self, email, admin):
