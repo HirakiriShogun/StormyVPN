@@ -1,4 +1,5 @@
 
+import logging
 import os
 import requests
 import json
@@ -15,6 +16,7 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 
 SESSION_COOKIE_NAME = os.getenv("SESSION_COOKIE_NAME", "session")
+logger = logging.getLogger(__name__)
 
 def _normalize_url(url: str) -> str:
     return url.rstrip('/') if url else url
@@ -28,14 +30,35 @@ class VPNApi:
 
     def authenticate_server(self, server):
         login_data = {"username": server["username"], "password": server["password"]}
+        logger.info("Auth: trying %s as %s", server["url"], server["username"])
         try:
-            response = self.session.post(f"{server['url']}/login/", data=login_data, verify=False)
+            response = self.session.post(
+                f"{server['url']}/login/",
+                data=login_data,
+                verify=False,
+                timeout=15,
+            )
+            logger.info(
+                "Auth: %s status=%s cookies=%s",
+                server["url"],
+                response.status_code,
+                list(response.cookies.keys()),
+            )
+            if response.text:
+                logger.debug("Auth body (%s): %s", server["url"], response.text[:500])
             if response.status_code == 200:
                 self.session_cookie = response.cookies.get(SESSION_COOKIE_NAME)
+                if not self.session_cookie:
+                    logger.warning(
+                        "Auth: no %s cookie in response from %s (cookies=%s)",
+                        SESSION_COOKIE_NAME,
+                        server["url"],
+                        response.cookies.get_dict(),
+                    )
                 return True
             print(f"Login failed on {server['url']}: {response.status_code} - {response.text}")
         except Exception as e:
-            print(f"Error during authentication {server['url']}: {e}")
+            logger.exception("Error during authentication %s: %s", server["url"], e)
         return False
 
     def check_server_load(self, server):
@@ -62,14 +85,17 @@ class VPNApi:
             return None
 
         self.active_server = None
+        self.session_cookie = None
         best_server = None
         min_load = float('inf')
 
+        logger.info("Select server: %s candidates", len(self.servers))
         for server in self.servers:
             server = server.copy()
             server["url"] = _normalize_url(server["url"])
             if self.authenticate_server(server):
                 load = self.check_server_load(server)
+                logger.info("Select server: %s load=%s", server["url"], load)
                 if load < min_load:
                     min_load = load
                     best_server = server
@@ -78,10 +104,10 @@ class VPNApi:
                     best_server = server
 
         if best_server:
-            print(f"Selected server: {best_server['url']}")
+            logger.info("Selected server: %s (load=%s)", best_server['url'], min_load)
             self.active_server = best_server
         else:
-            print("Failed to authenticate any configured server.")
+            logger.error("Failed to authenticate any configured server.")
 
     def buy_vpn(self, email, admin):
         if not self.active_server:
