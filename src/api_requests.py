@@ -30,21 +30,21 @@ class VPNApi:
 
     def authenticate_server(self, server):
         login_data = {"username": server["username"], "password": server["password"]}
-        print(f"[auth] try {server['url']} as {server['username']}")
+        print(f"[auth] try {server['url']} as {server['username']}", flush=True)
         try:
             login_url = f"{server['url']}/login/"
             # Попытка 1: x-www-form-urlencoded (data)
             response = self.session.post(
                 login_url, data=login_data, verify=False, timeout=15
             )
-            print(f"[auth-urlencoded] {server['url']} status={response.status_code} cookies={list(response.cookies.keys())}")
+            print(f"[auth-urlencoded] {server['url']} status={response.status_code} cookies={list(response.cookies.keys())}", flush=True)
             if response.text:
-                print(f"[auth-urlencoded-body] {response.text[:200]}")
+                print(f"[auth-urlencoded-body] {response.text[:200]}", flush=True)
 
             cookie = response.cookies.get(SESSION_COOKIE_NAME)
             if response.status_code == 200 and cookie:
                 self.session_cookie = cookie
-                print(f"[auth] success urlencoded {server['url']} cookie={SESSION_COOKIE_NAME}")
+                print(f"[auth] success urlencoded {server['url']} cookie={SESSION_COOKIE_NAME}", flush=True)
                 return True
 
             # Попытка 2: multipart/form-data (как в Postman) если нет cookie
@@ -52,17 +52,17 @@ class VPNApi:
             response2 = self.session.post(
                 login_url, files=files, verify=False, timeout=15
             )
-            print(f"[auth-multipart] {server['url']} status={response2.status_code} cookies={list(response2.cookies.keys())}")
+            print(f"[auth-multipart] {server['url']} status={response2.status_code} cookies={list(response2.cookies.keys())}", flush=True)
             if response2.text:
-                print(f"[auth-multipart-body] {response2.text[:200]}")
+                print(f"[auth-multipart-body] {response2.text[:200]}", flush=True)
 
             cookie2 = response2.cookies.get(SESSION_COOKIE_NAME)
             if response2.status_code == 200 and cookie2:
                 self.session_cookie = cookie2
-                print(f"[auth] success multipart {server['url']} cookie={SESSION_COOKIE_NAME}")
+                print(f"[auth] success multipart {server['url']} cookie={SESSION_COOKIE_NAME}", flush=True)
                 return True
 
-            print(f"[auth-error] {server['url']} status1={response.status_code} cookies1={response.cookies.get_dict()} status2={response2.status_code} cookies2={response2.cookies.get_dict()}")
+            print(f"[auth-error] {server['url']} status1={response.status_code} cookies1={response.cookies.get_dict()} status2={response2.status_code} cookies2={response2.cookies.get_dict()}", flush=True)
         except Exception as e:
             print(f"[auth-exception] {server['url']} error={e}")
         return False
@@ -95,13 +95,13 @@ class VPNApi:
         best_server = None
         min_load = float('inf')
 
-        print(f"[select] candidates={len(self.servers)}")
+        print(f"[select] candidates={len(self.servers)}", flush=True)
         for server in self.servers:
             server = server.copy()
             server["url"] = _normalize_url(server["url"])
             if self.authenticate_server(server):
                 load = self.check_server_load(server)
-                print(f"[select] {server['url']} load={load}")
+                print(f"[select] {server['url']} load={load}", flush=True)
                 if load < min_load:
                     min_load = load
                     best_server = server
@@ -110,7 +110,7 @@ class VPNApi:
                     best_server = server
 
         if best_server:
-            print(f"[select] selected {best_server['url']} load={min_load}")
+            print(f"[select] selected {best_server['url']} load={min_load}", flush=True)
             self.active_server = best_server
         else:
             print("[select-error] Failed to authenticate any configured server")
