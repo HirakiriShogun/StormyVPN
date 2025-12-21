@@ -650,8 +650,8 @@ async def add_days_to_all_users(days: int, notify_chat: int):
 
     for user in users:
         chat_id, username, expiry_date, _, _, inbound_id, server_url = user
-            # Блокирующий запрос к 3x-ui выносим из event loop
-            server_data = await asyncio.to_thread(vpn_api.get_inbound_data, inbound_id, server_url)
+        # Блокирующий запрос к 3x-ui выносим из event loop
+        server_data = await asyncio.to_thread(vpn_api.get_inbound_data, inbound_id, server_url)
 
         if not server_data or server_data.get("_error"):
             skipped += 1
