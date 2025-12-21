@@ -205,7 +205,8 @@ async def sync_with_servers():
 
         for user in users:
             chat_id, username, expiry_date, _, _, inbound_id, server_url = user
-            server_data = vpn_api.get_inbound_data(inbound_id, server_url)
+            # Блокирующий запрос к 3x-ui выносим из event loop
+            server_data = await asyncio.to_thread(vpn_api.get_inbound_data, inbound_id, server_url)
 
             # Если запрос упал по сети/авторизации — не трогаем запись, просто логируем и продолжаем
             if not server_data or server_data.get("_error"):
@@ -649,7 +650,8 @@ async def add_days_to_all_users(days: int, notify_chat: int):
 
     for user in users:
         chat_id, username, expiry_date, _, _, inbound_id, server_url = user
-        server_data = vpn_api.get_inbound_data(inbound_id, server_url)
+            # Блокирующий запрос к 3x-ui выносим из event loop
+            server_data = await asyncio.to_thread(vpn_api.get_inbound_data, inbound_id, server_url)
 
         if not server_data or server_data.get("_error"):
             skipped += 1
@@ -665,7 +667,8 @@ async def add_days_to_all_users(days: int, notify_chat: int):
         new_expiry_timestamp = int(new_expiry_date.timestamp() * 1000)
 
         try:
-            is_renewed = vpn_api.renew_vpn(inbound_id, server_url, new_expiry_timestamp)
+            # renew_vpn тоже блокирующий — выносим из event loop
+            is_renewed = await asyncio.to_thread(vpn_api.renew_vpn, inbound_id, server_url, new_expiry_timestamp)
         except Exception as e:
             logging.exception("Ошибка продления при подарке для %s: %s", chat_id, e)
             is_renewed = False
