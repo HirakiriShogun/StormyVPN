@@ -1,4 +1,5 @@
 
+import os
 import requests
 import json
 import urllib3
@@ -13,7 +14,7 @@ from config import SERVERS
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 
-SESSION_COOKIE_NAME = 'session'
+SESSION_COOKIE_NAME = os.getenv("SESSION_COOKIE_NAME", "session")
 
 def _normalize_url(url: str) -> str:
     return url.rstrip('/') if url else url
