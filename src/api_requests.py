@@ -57,6 +57,7 @@ class VPNApi:
             print("No server configuration provided.")
             return None
 
+        self.active_server = None
         best_server = None
         min_load = float('inf')
 

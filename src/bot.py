@@ -508,13 +508,24 @@ async def process_add_user_username(message: types.Message, state: FSMContext):
 
     email = VPNUtils.get_vpn_email(user_id)
     vpn_api.select_server()
+    if not vpn_api.active_server:
+        logging.error("Нет активного сервера для выдачи ключа (user_id=%s)", user_id)
+        await message.answer("❌ Нет доступных серверов. Проверьте настройки.", reply_markup=get_admin_keyboard())
+        await state.clear()
+        return
     try:
-        vless_key, inbound_id, server_url = vpn_api.buy_vpn(email, 0)
+        result = vpn_api.buy_vpn(email, 0)
     except Exception as e:
         logging.exception("Ошибка выдачи ключа при ручном добавлении пользователя: %s", e)
         await message.answer("❌ Ошибка при получении VPN-ключа.", reply_markup=get_admin_keyboard())
         await state.clear()
         return
+    if not result:
+        logging.error("VPN API вернул пустой результат при ручном добавлении пользователя (user_id=%s)", user_id)
+        await message.answer("❌ Не удалось получить VPN-ключ. Проверьте сервер.", reply_markup=get_admin_keyboard())
+        await state.clear()
+        return
+    vless_key, inbound_id, server_url = result
 
     if vless_key:
         expiry_date = VPNUtils.format_expiry_date(datetime.now() + timedelta(days=31))

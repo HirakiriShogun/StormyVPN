@@ -1,3 +1,4 @@
+import logging
 from datetime import datetime, timedelta
 from typing import Optional, Tuple
 
@@ -51,14 +52,33 @@ class SubscriptionService:
         email = VPNUtils.get_vpn_email(chat_id)
         self.vpn_api.select_server()
 
+        if not self.vpn_api.active_server:
+            logging.error("Нет активного сервера для активации подписки (chat_id=%s)", chat_id)
+            await bot.send_message(
+                chat_id,
+                "❌ Нет доступных серверов. Повторите позже или свяжитесь с поддержкой.",
+            )
+            return False
+
         try:
-            vless_key, inbound_id, server_url = self.vpn_api.buy_vpn(email, 0)
-        except Exception:
+            result = self.vpn_api.buy_vpn(email, 0)
+        except Exception as e:
+            logging.exception("Ошибка при активации VPN для chat_id=%s: %s", chat_id, e)
             await bot.send_message(
                 chat_id,
                 "❌ Ошибка при активации VPN. Обратитесь в поддержку.\n@hirakiri_shogun",
             )
             return False
+
+        if not result:
+            logging.error("VPN API вернул пустой результат при активации (chat_id=%s)", chat_id)
+            await bot.send_message(
+                chat_id,
+                "❌ Не удалось получить VPN-ключ. Проверьте сервер или обратитесь в поддержку.",
+            )
+            return False
+
+        vless_key, inbound_id, server_url = result
 
         if vless_key:
             self.database.add_user(
