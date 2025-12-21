@@ -21,6 +21,19 @@ logger = logging.getLogger(__name__)
 def _normalize_url(url: str) -> str:
     return url.rstrip('/') if url else url
 
+def _has_cookie(session, server_url: str) -> bool:
+    """Проверяем, есть ли cookie для этого хоста в сессии."""
+    from urllib.parse import urlparse
+    host = None
+    try:
+        host = urlparse(server_url).hostname
+    except Exception:
+        pass
+    jar = session.cookies
+    if host and jar.get(SESSION_COOKIE_NAME, domain=host):
+        return True
+    return jar.get(SESSION_COOKIE_NAME) is not None
+
 class VPNApi:
     def __init__(self, servers: Optional[List[Dict[str, Any]]] = None):
         self.session = requests.Session()
@@ -306,9 +319,11 @@ class VPNApi:
             print(f"❌ Ошибка: Сервер {server_url} не найден!")
             return {"_error": "server_not_configured"}
 
-        if not self.authenticate_server(server):
-            print(f"❌ Ошибка авторизации на сервере {server_url}.")
-            return {"_error": "auth_failed"}
+        need_auth = not _has_cookie(self.session, server["url"])
+        if need_auth:
+            if not self.authenticate_server(server):
+                print(f"❌ Ошибка авторизации на сервере {server_url}.")
+                return {"_error": "auth_failed"}
 
         headers = {
             "Content-Type": "application/json",
@@ -317,12 +332,13 @@ class VPNApi:
         }
 
         try:
-            response = self.session.get(
-                f"{server['url']}/panel/api/inbounds/get/{inbound_id}/",
-                headers=headers,
-                verify=False,
-                timeout=10,
-            )
+            url = f"{server['url']}/panel/api/inbounds/get/{inbound_id}/"
+            response = self.session.get(url, headers=headers, verify=False, timeout=10)
+            if response.status_code in (401, 403) and not need_auth:
+                # Переавторизуемся один раз при просрочке cookie
+                if self.authenticate_server(server):
+                    headers["Cookie"] = f"{SESSION_COOKIE_NAME}={self.session_cookie}"
+                    response = self.session.get(url, headers=headers, verify=False, timeout=10)
         except requests.exceptions.RequestException as e:
             print(f"❌ Ошибка при запросе inbound: {e}")
             return {"_error": f"request_error: {e}"}
