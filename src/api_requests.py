@@ -32,31 +32,52 @@ class VPNApi:
         login_data = {"username": server["username"], "password": server["password"]}
         logger.info("Auth: trying %s as %s", server["url"], server["username"])
         try:
+            login_url = f"{server['url']}/login/"
+            # Попытка 1: x-www-form-urlencoded (data)
             response = self.session.post(
-                f"{server['url']}/login/",
-                data=login_data,
-                verify=False,
-                timeout=15,
+                login_url, data=login_data, verify=False, timeout=15
             )
             logger.info(
-                "Auth: %s status=%s cookies=%s",
+                "Auth (urlencoded): %s status=%s cookies=%s",
                 server["url"],
                 response.status_code,
                 list(response.cookies.keys()),
             )
             if response.text:
                 logger.debug("Auth body (%s): %s", server["url"], response.text[:500])
-            if response.status_code == 200:
-                self.session_cookie = response.cookies.get(SESSION_COOKIE_NAME)
-                if not self.session_cookie:
-                    logger.warning(
-                        "Auth: no %s cookie in response from %s (cookies=%s)",
-                        SESSION_COOKIE_NAME,
-                        server["url"],
-                        response.cookies.get_dict(),
-                    )
+
+            cookie = response.cookies.get(SESSION_COOKIE_NAME)
+            if response.status_code == 200 and cookie:
+                self.session_cookie = cookie
                 return True
-            print(f"Login failed on {server['url']}: {response.status_code} - {response.text}")
+
+            # Попытка 2: multipart/form-data (как в Postman) если нет cookie
+            files = {k: (None, v) for k, v in login_data.items()}
+            response2 = self.session.post(
+                login_url, files=files, verify=False, timeout=15
+            )
+            logger.info(
+                "Auth (multipart): %s status=%s cookies=%s",
+                server["url"],
+                response2.status_code,
+                list(response2.cookies.keys()),
+            )
+            if response2.text:
+                logger.debug("Auth body2 (%s): %s", server["url"], response2.text[:500])
+
+            cookie2 = response2.cookies.get(SESSION_COOKIE_NAME)
+            if response2.status_code == 200 and cookie2:
+                self.session_cookie = cookie2
+                return True
+
+            logger.error(
+                "Login failed on %s: status1=%s cookies1=%s status2=%s cookies2=%s",
+                server["url"],
+                response.status_code,
+                response.cookies.get_dict(),
+                response2.status_code,
+                response2.cookies.get_dict(),
+            )
         except Exception as e:
             logger.exception("Error during authentication %s: %s", server["url"], e)
         return False
