@@ -1,5 +1,7 @@
 import asyncio
 import logging
+import builtins
+logging.open = builtins.open
 import re
 from datetime import datetime, timedelta
 from typing import Any, Awaitable, Callable
