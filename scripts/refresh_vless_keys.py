@@ -34,36 +34,52 @@ def refresh_vless_links(dry_run: bool = False) -> None:
     db = VPNDatabase()
     users = db.get_all_users()
     server_map = _build_server_map(vpn_api.servers)
+    servers_ordered = [s for s in vpn_api.servers]
 
     print(f"[info] Users in DB: {len(users)}")
     updated = skipped = 0
 
     for user in users:
         chat_id, username, expiry_date, _, _, inbound_id, server_url = user
-        resolved_url = server_map.get(_signature(server_url), _normalize_url(server_url or ""))
+        # Подбираем сервер: сначала по пути/порту, иначе исходный, иначе первый из списка
+        resolved_url = server_map.get(_signature(server_url), _normalize_url(server_url or "")) or ""
+        candidate_urls = []
+        if resolved_url:
+            candidate_urls.append(resolved_url)
+        for srv in servers_ordered:
+            normalized = _normalize_url(srv["url"])
+            if normalized not in candidate_urls:
+                candidate_urls.append(normalized)
 
-        inbound_data = vpn_api.get_inbound_data(inbound_id, resolved_url)
+        inbound_data = None
+        used_server = None
+        for candidate in candidate_urls:
+            inbound_data = vpn_api.get_inbound_data(inbound_id, candidate)
+            if inbound_data and not inbound_data.get("_not_found") and not inbound_data.get("_error"):
+                used_server = candidate
+                break
+
         if not inbound_data or inbound_data.get("_error") or inbound_data.get("_not_found"):
             skipped += 1
             print(f"[skip] chat_id={chat_id} inbound={inbound_id}: {inbound_data}")
             continue
 
-        vless_link = vpn_api.build_vless_uri(inbound_data, resolved_url)
+        vless_link = vpn_api.build_vless_uri(inbound_data, used_server)
         if not vless_link:
             skipped += 1
             print(f"[skip] chat_id={chat_id} inbound={inbound_id}: cannot build VLESS link")
             continue
 
         if dry_run:
-            print(f"[dry-run] chat_id={chat_id} server_url: {server_url} -> {resolved_url}")
+            print(f"[dry-run] chat_id={chat_id} server_url: {server_url} -> {used_server}")
             continue
 
         db.execute_query(
             "UPDATE users SET vless_key=%s, server_url=%s WHERE chat_id=%s",
-            (vless_link, resolved_url, chat_id),
+            (vless_link, used_server, chat_id),
         )
         updated += 1
-        print(f"[ok] chat_id={chat_id} updated")
+        print(f"[ok] chat_id={chat_id} updated (server {used_server})")
 
     print(f"[done] updated={updated}, skipped={skipped}, dry_run={dry_run}")
 
