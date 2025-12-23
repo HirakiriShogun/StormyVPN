@@ -219,8 +219,8 @@ async def sync_with_servers():
 
             # Явно удаляем только если сервер подтвердил, что inbound не найден
             if server_data.get("_not_found"):
-                database.remove_user_local(chat_id)
-                deleted += 1
+                # Не удаляем автоматически, чтобы не потерять пользователей при неверных server_url
+                logging.warning("Inbound not found for chat_id=%s inbound_id=%s on %s", chat_id, inbound_id, server_url)
                 continue
 
             server_expiry_timestamp = server_data.get("expiryTime")
