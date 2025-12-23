@@ -25,15 +25,14 @@ def _normalize_url(url: str) -> str:
 def _has_cookie(session, server_url: str) -> bool:
     """Проверяем, есть ли cookie для этого хоста в сессии."""
     from urllib.parse import urlparse
-    host = None
     try:
         host = urlparse(server_url).hostname
     except Exception:
-        pass
+        host = None
+    if not host:
+        return False
     jar = session.cookies
-    if host and jar.get(SESSION_COOKIE_NAME, domain=host):
-        return True
-    return jar.get(SESSION_COOKIE_NAME) is not None
+    return jar.get(SESSION_COOKIE_NAME, domain=host) is not None
 
 class VPNApi:
     def __init__(self, servers: Optional[List[Dict[str, Any]]] = None):
