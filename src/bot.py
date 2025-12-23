@@ -347,45 +347,38 @@ async def start_aliases(message: types.Message):
     
 @dp.message(F.text.in_(["Оформить VPN 💳", "Продлить VPN 🔑"]))
 async def ask_for_email(message: types.Message, state: FSMContext):
-    await state.clear()
-    await message.answer("Изивните, в данный момент купить / продлить невозможно")
-    return
-    # 📌 Старый сценарий оформления/продления — оставлен закомментированным
-    # await message.answer("📩 По 54-ФЗ мы обязаны отправить вам чек. Пожалуйста, введите вашу почту для получения квитанции. ✉️\n\n❌ Или напишите Отмена для выхода в Главное меню")
-    # await state.set_state(EmailState.waiting_for_email)
+    await message.answer("📩 По 54-ФЗ мы обязаны отправить вам чек. Пожалуйста, введите вашу почту для получения квитанции. ✉️\n\n❌ Или напишите Отмена для выхода в Главное меню")
+    await state.set_state(EmailState.waiting_for_email)
 
 
 @dp.message(EmailState.waiting_for_email)
 async def process_email(message: types.Message, state: FSMContext):
-    await message.answer("Изивните, в данный момент купить / продлить невозможно")
+    email = message.text.strip()
+    
+    if email.lower() == "отмена":
+        await state.clear()
+        status = database.get_subscription_status(message.chat.id)
+        reply_kb = get_main_keyboard(status, message.chat.id in ADMIN_IDS)
+        await message.answer("❌ Ввод email отменён.", reply_markup=reply_kb)
+        return
+    
+    if not re.match(r'^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+$', email):
+        await message.answer("🚫 Неверный формат email. Попробуйте ещё раз.")
+        return
+    
     await state.clear()
-    return
-    # email = message.text.strip()
-    # 
-    # if email.lower() == "отмена":
-    #     await state.clear()
-    #     status = database.get_subscription_status(message.chat.id)
-    #     reply_kb = get_main_keyboard(status, message.chat.id in ADMIN_IDS)
-    #     await message.answer("❌ Ввод email отменён.", reply_markup=reply_kb)
-    #     return
-    # 
-    # if not re.match(r'^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+$', email):
-    #     await message.answer("🚫 Неверный формат email. Попробуйте ещё раз.")
-    #     return
-    # 
-    # await state.clear()
-    #
-    # amount = 149
-    # payment_id, payment_link = await create_payment(amount, message.chat.id, email)
-    # if not payment_id or not payment_link:
-    #     return await message.answer("❌ Не удалось создать платеж. Попробуйте позже или свяжитесь с поддержкой.")
-    # database.add_payment(message.chat.id, payment_id, amount)
-    # 
-    # markup = InlineKeyboardMarkup(inline_keyboard=[
-    #     [InlineKeyboardButton(text="💳 Оплатить (149 руб)", url=payment_link)]
-    # ])
-    #
-    # await message.answer("✅ Почта сохранена!\n\n💳 Теперь вы можете оплатить подписку. После успешной оплаты чек будет отправлен на вашу почту.", reply_markup=markup)
+    
+    amount = 1
+    payment_id, payment_link = await create_payment(amount, message.chat.id, email)
+    if not payment_id or not payment_link:
+        return await message.answer("❌ Не удалось создать платеж. Попробуйте позже или свяжитесь с поддержкой.")
+    database.add_payment(message.chat.id, payment_id, amount)
+    
+    markup = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="💳 Оплатить (149 руб)", url=payment_link)]
+    ])
+    
+    await message.answer("✅ Почта сохранена!\n\n💳 Теперь вы можете оплатить подписку. После успешной оплаты чек будет отправлен на вашу почту.", reply_markup=markup)
 
     
 @dp.message(F.text == "Как настроить VPN? 📖")

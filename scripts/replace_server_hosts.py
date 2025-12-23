@@ -8,10 +8,10 @@
 from __future__ import annotations
 
 import argparse
-import re
 import sys
 from pathlib import Path
 from typing import Dict
+from urllib.parse import urlsplit, urlunsplit
 
 
 BASE_DIR = Path(__file__).resolve().parents[1]
@@ -21,26 +21,29 @@ from database import VPNDatabase  # noqa: E402
 
 
 def replace_hosts(text: str, host_map: Dict[str, str]) -> str:
-    """Меняет хосты в строке по карте host_map (с учётом возможного порта)."""
-    def _sub(match: re.Match) -> str:
-        host = match.group(1)  # может быть host или host:port
-        host_only, *port_parts = host.split(":", 1)
+    """Меняет хосты в строке по карте host_map (учитывает user@host:port в VLESS)."""
+    try:
+        parts = urlsplit(text)
+    except Exception:
+        return text
 
-        if host in host_map:
-            new_host = host_map[host]
-            return new_host
+    netloc = parts.netloc
+    userinfo, hostport = (netloc.split("@", 1) + [None])[:2] if "@" in netloc else (None, netloc)
+    host_only, port = (hostport.split(":", 1) + [""])[:2] if hostport else ("", "")
 
-        if host_only in host_map:
-            new_host = host_map[host_only]
-            # если в исходной строке был порт, а в замене его нет — сохраняем старый порт
-            if ":" not in new_host and port_parts:
-                return f"{new_host}:{port_parts[0]}"
-            return new_host
+    new_host = None
+    if hostport in host_map:
+        new_host = host_map[hostport]
+    elif host_only in host_map:
+        new_host = host_map[host_only]
+        if ":" not in new_host and port:
+            new_host = f"{new_host}:{port}"
 
-        return host
+    if not new_host:
+        return text
 
-    pattern = re.compile(r"(?<=//)([^/:]+(?:\:\d+)?)")
-    return pattern.sub(_sub, text)
+    new_netloc = f"{userinfo}@{new_host}" if userinfo else new_host
+    return urlunsplit((parts.scheme, new_netloc, parts.path, parts.query, parts.fragment))
 
 
 def main(host_map: Dict[str, str], dry_run: bool) -> None:
