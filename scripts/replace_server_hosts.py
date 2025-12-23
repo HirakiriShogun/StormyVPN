@@ -23,8 +23,21 @@ from database import VPNDatabase  # noqa: E402
 def replace_hosts(text: str, host_map: Dict[str, str]) -> str:
     """Меняет хосты в строке по карте host_map (с учётом возможного порта)."""
     def _sub(match: re.Match) -> str:
-        host = match.group(1)
-        return host_map.get(host, host)
+        host = match.group(1)  # может быть host или host:port
+        host_only, *port_parts = host.split(":", 1)
+
+        if host in host_map:
+            new_host = host_map[host]
+            return new_host
+
+        if host_only in host_map:
+            new_host = host_map[host_only]
+            # если в исходной строке был порт, а в замене его нет — сохраняем старый порт
+            if ":" not in new_host and port_parts:
+                return f"{new_host}:{port_parts[0]}"
+            return new_host
+
+        return host
 
     pattern = re.compile(r"(?<=//)([^/:]+(?:\:\d+)?)")
     return pattern.sub(_sub, text)
