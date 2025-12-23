@@ -9,6 +9,7 @@ import uuid
 import time
 from datetime import datetime, timedelta
 from typing import List, Dict, Any, Optional
+from urllib.parse import urlparse, quote
 
 from config import SERVERS
 
@@ -213,13 +214,73 @@ class VPNApi:
     def generate_vless_key(self, client_obj, short_id):
         inbound_id = client_obj["id"]
         server_url = self.active_server['url']
-        settings = json.loads(client_obj["settings"])
-        client_id = settings["clients"][0]["id"]
-        server = self.active_server["url"].split("//")[1].split(":")[0]
-        port = int(client_obj["port"])
-        return (f"vless://{client_id}@{server}:{port}?type=tcp&security=reality&"
-                f"pbk=2UqLjQFhlvLcY7VzaKRotIDQFOgAJe1dYD1njigp9wk&fp=random&"
-                f"sni=yahoo.com&sid={short_id}&spx=%2F#New-{settings['clients'][0]['subId']}", inbound_id, server_url)
+        vless_uri = self.build_vless_uri(client_obj, server_url)
+        return vless_uri, inbound_id, server_url
+
+    def build_vless_uri(self, inbound_obj: Dict[str, Any], server_url: str) -> Optional[str]:
+        """Собирает VLESS ссылку из inbound данных (используем реальные настройки сервера)."""
+        try:
+            settings_raw = inbound_obj.get("settings")
+            settings = json.loads(settings_raw) if isinstance(settings_raw, str) else (settings_raw or {})
+        except Exception:
+            logger.exception("Не удалось разобрать settings для inbound %s", inbound_obj.get("id"))
+            return None
+
+        clients = settings.get("clients") or []
+        if not clients or not isinstance(clients, list):
+            logger.warning("В inbound %s нет clients", inbound_obj.get("id"))
+            return None
+
+        client = clients[0]
+        client_id = client.get("id")
+        if not client_id:
+            logger.warning("В inbound %s отсутствует client id", inbound_obj.get("id"))
+            return None
+
+        try:
+            stream_settings_raw = inbound_obj.get("streamSettings")
+            stream_settings = json.loads(stream_settings_raw) if isinstance(stream_settings_raw, str) else (stream_settings_raw or {})
+        except Exception:
+            logger.exception("Не удалось разобрать streamSettings для inbound %s", inbound_obj.get("id"))
+            return None
+
+        network = stream_settings.get("network", "tcp")
+        security = stream_settings.get("security", "reality")
+        reality_settings = stream_settings.get("realitySettings", {}) or {}
+        reality_opts = reality_settings.get("settings", {}) or {}
+
+        server_host = urlparse(server_url).hostname or ""
+        port = inbound_obj.get("port")
+        decryption = settings.get("decryption", "none") or "none"
+        short_ids = reality_settings.get("shortIds") or []
+        short_id = short_ids[0] if short_ids else ""
+        server_names = reality_settings.get("serverNames") or []
+        sni = server_names[0] if server_names else reality_opts.get("serverName", "")
+        pbk = reality_opts.get("publicKey", "")
+        fingerprint = reality_opts.get("fingerprint", "random") or "random"
+        spider_x = reality_opts.get("spiderX", "/") or "/"
+        flow = client.get("flow") or ""
+        tag_source = client.get("email") or client.get("subId") or client_id
+        tag = quote(tag_source, safe="")
+
+        query_parts = [
+            ("type", network),
+            ("encryption", decryption),
+            ("security", security),
+            ("pbk", pbk),
+            ("fp", fingerprint),
+            ("sni", sni),
+            ("sid", short_id),
+            ("spx", spider_x),
+        ]
+        if flow:
+            query_parts.append(("flow", flow))
+
+        def _encode(value: Any) -> str:
+            return quote(str(value), safe="")
+
+        query = "&".join(f"{k}={_encode(v)}" for k, v in query_parts if v not in (None, ""))
+        return f"vless://{client_id}@{server_host}:{port}?{query}#{tag}"
 
     def remove_user(self, inbound_id, server_url):
         target_url = _normalize_url(server_url)
@@ -422,105 +483,75 @@ class VPNApi:
         print(f"🔚 Найдено inbounds: {len(found_inbounds)}")
         return found_inbounds
 
+
     def get_user_data_from_inbound(self, inbound_data, server_url):
-        """Получает данные пользователя из данных inbound"""
+        """Получает данные пользователя из inbound и собирает актуальную VLESS ссылку."""
         if not inbound_data:
-            print("❌ Пустые inbound_data")
+            print("? Пустые inbound_data")
             return None
 
         try:
             inbound_id = inbound_data.get("id")
-            print(f"🔍 Обрабатываем inbound ID: {inbound_id}")
+            print(f"?? Обрабатываем inbound ID: {inbound_id}")
             
-            # Проверяем settings
-            settings_str = inbound_data.get("settings")
-            if not settings_str:
-                print(f"❌ Inbound {inbound_id} не содержит settings")
+            settings_raw = inbound_data.get("settings")
+            if not settings_raw:
+                print(f"? Inbound {inbound_id} не содержит settings")
                 return None
                 
             try:
-                settings = json.loads(settings_str)
+                settings = json.loads(settings_raw) if isinstance(settings_raw, str) else settings_raw
             except json.JSONDecodeError:
-                print(f"❌ Inbound {inbound_id} содержит невалидные settings")
+                print(f"? Inbound {inbound_id} содержит невалидные settings")
                 return None
 
-            # Проверяем clients
             clients = settings.get("clients")
             if not clients or not isinstance(clients, list):
-                print(f"❌ Inbound {inbound_id} не содержит clients")
+                print(f"? Inbound {inbound_id} не содержит clients")
                 return None
 
-            # Берем первого клиента
             client = clients[0]
             if not isinstance(client, dict):
-                print(f"❌ Inbound {inbound_id} содержит невалидного клиента")
+                print(f"? Inbound {inbound_id} содержит невалидного клиента")
                 return None
 
-            # Проверяем email
             email = client.get("email")
             if not email or not isinstance(email, str):
-                print(f"❌ Inbound {inbound_id} содержит невалидный email")
+                print(f"? Inbound {inbound_id} содержит невалидный email")
                 return None
 
-            # Извлекаем chat_id из email (новый формат: user_123456789@stormyvpn.com)
             try:
-                # Разбираем email формата user_123456789@stormyvpn.com
                 if email.startswith("user_") and "@stormyvpn.com" in email:
-                    user_part = email.split("@")[0]  # user_123456789
-                    chat_id = int(user_part.split("_")[1])  # 123456789
-                    print(f"ℹ️ Извлечен chat_id: {chat_id} из email: {email}")
+                    user_part = email.split("@")[0]
+                    chat_id = int(user_part.split("_")[1])
+                    print(f"?? Извлечен chat_id: {chat_id} из email: {email}")
                 else:
-                    print(f"❌ Inbound {inbound_id} содержит email в неожиданном формате: {email}")
+                    print(f"? Inbound {inbound_id} содержит email в неожиданном формате: {email}")
                     return None
-
             except (ValueError, IndexError) as e:
-                print(f"❌ Ошибка извлечения chat_id из email: {email}, ошибка: {e}")
+                print(f"? Ошибка извлечения chat_id из email: {email}, ошибка: {e}")
                 return None
 
-            # Обрабатываем expiryTime - сначала проверяем в клиенте, потом в основном inbound
             expiry_time = client.get("expiryTime", inbound_data.get("expiryTime", 0))
-            
-            # Если expiry_time равно 0, устанавливаем дефолтное значение (текущая дата + 30 дней)
             if expiry_time == 0:
                 expiry_time = int((datetime.now() + timedelta(days=30)).timestamp() * 1000)
-                print(f"⚠️ Для inbound {inbound_id} установлена дефолтная дата окончания подписки")
+                print(f"?? Для inbound {inbound_id} установлена дефолтная дата окончания подписки")
             
             try:
                 expiry_date = datetime.fromtimestamp(expiry_time / 1000)
                 expiry_str = expiry_date.strftime("%d.%m.%Y %H:%M")
-                print(f"ℹ️ Дата окончания подписки: {expiry_str}")
+                print(f"?? Дата окончания подписки: {expiry_str}")
             except Exception as e:
-                print(f"❌ Ошибка обработки expiryTime: {e}")
-                # Устанавливаем дефолтную дату при ошибке
+                print(f"? Ошибка обработки expiryTime: {e}")
                 expiry_date = datetime.now() + timedelta(days=30)
                 expiry_str = expiry_date.strftime("%d.%m.%Y %H:%M")
 
-            # Генерируем VLESS ключ
-            try:
-                stream_settings_str = inbound_data.get("streamSettings")
-                if not stream_settings_str:
-                    print(f"❌ Inbound {inbound_id} не содержит streamSettings")
-                    return None
-
-                stream_settings = json.loads(stream_settings_str)
-                reality_settings = stream_settings.get("realitySettings", {})
-                short_ids = reality_settings.get("shortIds", [])
-                short_id = short_ids[0] if short_ids else ""
-
-                server_host = server_url.split("//")[1].split(":")[0]
-                port = inbound_data.get("port", 0)
-                client_id = client.get("id", "")
-
-                vless_key = (
-                    f"vless://{client_id}@{server_host}:{port}?type=tcp&security=reality&"
-                    f"pbk=2UqLjQFhlvLcY7VzaKRotIDQFOgAJe1dYD1njigp9wk&fp=random&"
-                    f"sni=yahoo.com&sid={short_id}&spx=%2F#New-{client.get('subId', '')}"
-                )
-            except Exception as e:
-                print(f"❌ Ошибка генерации VLESS ключа: {e}")
+            vless_key = self.build_vless_uri(inbound_data, server_url)
+            if not vless_key:
+                print(f"? Ошибка генерации VLESS ключа для inbound {inbound_id}")
                 return None
 
-            print(f"✅ Успешно обработан inbound {inbound_id} для пользователя {email}")
+            print(f"? Успешно обработан inbound {inbound_id} для пользователя {email}")
             return {
                 "chat_id": chat_id,
                 "email": email,
@@ -531,7 +562,7 @@ class VPNApi:
             }
 
         except Exception as e:
-            print(f"❌ Критическая ошибка обработки inbound: {e}")
+            print(f"? Критическая ошибка обработки inbound: {e}")
             return None
 
     def restore_all_users_bruteforce(self):
