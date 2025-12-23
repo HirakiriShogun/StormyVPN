@@ -46,7 +46,6 @@ logging.basicConfig(
 
 
 async def notify_admin(message: str):
-    """Отправляет уведомление первому админу (если задан)."""
     if not ADMIN_IDS:
         return
     admin_id = ADMIN_IDS[0]
