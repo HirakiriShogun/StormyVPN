@@ -367,7 +367,7 @@ async def process_email(message: types.Message, state: FSMContext):
     
     await state.clear()
     
-    amount = 1
+    amount = 149
     payment_id, payment_link = await create_payment(amount, message.chat.id, email)
     if not payment_id or not payment_link:
         return await message.answer("❌ Не удалось создать платеж. Попробуйте позже или свяжитесь с поддержкой.")
