@@ -46,7 +46,6 @@ class VPNApi:
         print(f"[auth] try {server['url']} as {server['username']}", flush=True)
         try:
             login_url = f"{server['url']}/login/"
-            # Попытка 1: x-www-form-urlencoded (data)
             response = self.session.post(
                 login_url, data=login_data, verify=False, timeout=15
             )
@@ -60,7 +59,6 @@ class VPNApi:
                 print(f"[auth] success urlencoded {server['url']} cookie={SESSION_COOKIE_NAME}", flush=True)
                 return True
 
-            # Попытка 2: multipart/form-data (как в Postman) если нет cookie
             files = {k: (None, v) for k, v in login_data.items()}
             response2 = self.session.post(
                 login_url, files=files, verify=False, timeout=15

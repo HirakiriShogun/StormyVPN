@@ -17,11 +17,10 @@ from urllib.parse import urlsplit, urlunsplit
 BASE_DIR = Path(__file__).resolve().parents[1]
 sys.path.append(str(BASE_DIR / "src"))
 
-from database import VPNDatabase  # noqa: E402
+from database import VPNDatabase
 
 
 def replace_hosts(text: str, host_map: Dict[str, str]) -> str:
-    """Меняет хосты в строке по карте host_map (учитывает user@host:port в VLESS)."""
     try:
         parts = urlsplit(text)
     except Exception:
