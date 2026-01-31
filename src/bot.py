@@ -369,14 +369,14 @@ async def process_email(message: types.Message, state: FSMContext):
     
     await state.clear()
     
-    amount = 149
+    amount = 179
     payment_id, payment_link = await create_payment(amount, message.chat.id, email)
     if not payment_id or not payment_link:
         return await message.answer("❌ Не удалось создать платеж. Попробуйте позже или свяжитесь с поддержкой.")
     database.add_payment(message.chat.id, payment_id, amount)
     
     markup = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="💳 Оплатить (149 руб)", url=payment_link)]
+        [InlineKeyboardButton(text="💳 Оплатить (179 руб)", url=payment_link)]
     ])
     
     await message.answer("✅ Почта сохранена!\n\n💳 Теперь вы можете оплатить подписку. После успешной оплаты чек будет отправлен на вашу почту.", reply_markup=markup)
