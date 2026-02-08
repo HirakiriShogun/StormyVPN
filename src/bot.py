@@ -590,6 +590,35 @@ async def process_add_user_username(message: types.Message, state: FSMContext):
     user_id = data.get("user_id")
     username = message.text.strip()
 
+    if not username:
+        await message.answer("🚫 Username не может быть пустым. Введите ещё раз.")
+        return
+
+    await state.update_data(username=username)
+    await message.answer("📌 Введите срок подписки в днях (например, 30). Или отправьте 'Отмена'.")
+    await state.set_state(AdminState.waiting_for_subscription_days)
+
+
+@dp.message(StateFilter(AdminState.waiting_for_subscription_days))
+async def process_add_user_days(message: types.Message, state: FSMContext):
+    chat_id = message.chat.id
+    if message.text.lower() == "отмена":
+        await message.answer("❌ Действие отменено.", reply_markup=get_admin_keyboard())
+        await state.clear()
+        return
+
+    try:
+        days = int(message.text.strip())
+        if days <= 0:
+            raise ValueError
+    except ValueError:
+        await message.answer("🚫 Введите положительное число дней. Например, 30.")
+        return
+
+    data = await state.get_data()
+    user_id = data.get("user_id")
+    username = data.get("username")
+
     email = VPNUtils.get_vpn_email(user_id)
     vpn_api.select_server()
     if not vpn_api.active_server:
@@ -598,7 +627,7 @@ async def process_add_user_username(message: types.Message, state: FSMContext):
         await state.clear()
         return
     try:
-        result = vpn_api.buy_vpn(email, 0)
+        result = vpn_api.buy_vpn(email, days)
     except Exception as e:
         logging.exception("Ошибка выдачи ключа при ручном добавлении пользователя: %s", e)
         await message.answer("❌ Ошибка при получении VPN-ключа.", reply_markup=get_admin_keyboard())
@@ -612,10 +641,13 @@ async def process_add_user_username(message: types.Message, state: FSMContext):
     vless_key, inbound_id, server_url = result
 
     if vless_key:
-        expiry_date = VPNUtils.format_expiry_date(datetime.now() + timedelta(days=31))
-        
+        expiry_date = VPNUtils.format_expiry_date(datetime.now() + timedelta(days=days))
+
         database.add_user(user_id, username, vless_key, expiry_date, inbound_id, server_url)
-        await message.answer(f"✅ Пользователь {username} (ID: {user_id}) успешно добавлен!", reply_markup=get_admin_keyboard())
+        await message.answer(
+            f"✅ Пользователь {username} (ID: {user_id}) успешно добавлен на {days} дней!",
+            reply_markup=get_admin_keyboard(),
+        )
     else:
         await message.answer("❌ Ошибка при получении VPN-ключа.", reply_markup=get_admin_keyboard())
 

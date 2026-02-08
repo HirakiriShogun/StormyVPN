@@ -126,7 +126,7 @@ class VPNApi:
         else:
             print("[select-error] Failed to authenticate any configured server")
 
-    def buy_vpn(self, email, admin):
+    def buy_vpn(self, email, days=30):
         if not self.active_server:
             print("No active server available.")
             return None
@@ -135,7 +135,12 @@ class VPNApi:
         sub_id = ''.join(random.choices('abcdefghijklmnopqrstuvwxyz0123456789', k=16))
         port = random.randint(10000, 60000)
 
-        days_to_add = 365 if admin else 30
+        try:
+            days_to_add = int(days)
+        except (TypeError, ValueError):
+            days_to_add = 30
+        if days_to_add <= 0:
+            days_to_add = 30
         expiry_time = int(time.time() * 1000) + (days_to_add * 24 * 60 * 60 * 1000)
         short_id = hex(random.randint(0, 2**32 - 1))[2:].zfill(8)
         client_data = {

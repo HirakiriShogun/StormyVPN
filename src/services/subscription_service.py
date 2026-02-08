@@ -61,7 +61,7 @@ class SubscriptionService:
             return False
 
         try:
-            result = self.vpn_api.buy_vpn(email, 0)
+            result = self.vpn_api.buy_vpn(email, 30)
         except Exception as e:
             logging.exception("Ошибка при активации VPN для chat_id=%s: %s", chat_id, e)
             await bot.send_message(
