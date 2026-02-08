@@ -44,6 +44,7 @@ def get_admin_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="Посмотреть всех пользователей")],
+            [KeyboardButton(text="Синхронизовать базу данных")],
             [KeyboardButton(text="Удалить пользователя по ID")],
             [KeyboardButton(text="Добавить пользователя")],
             [KeyboardButton(text="Написать сообщение всем пользователям")],

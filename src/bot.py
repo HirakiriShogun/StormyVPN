@@ -1,10 +1,11 @@
 import asyncio
+import json
 import logging
 import builtins
 logging.open = builtins.open
 import re
 from datetime import datetime, timedelta
-from typing import Any, Awaitable, Callable
+from typing import Any, Awaitable, Callable, Optional
 
 from aiogram import BaseMiddleware, Bot, Dispatcher, F, types
 from aiogram.filters import CommandStart, StateFilter
@@ -123,6 +124,7 @@ vpn_api = VPNApi()
 database = VPNDatabase()
 payment_service = PaymentService(SHOP_ID, SHOP_API, PAYMENT_RETURN_URL)
 subscription_service = SubscriptionService(database, vpn_api)
+sync_lock = asyncio.Lock()
 
 async def simulate_activity():
     while True:
@@ -196,21 +198,53 @@ async def activate_subscription(chat_id: int):
     if success:
         await how_to_use_auto(chat_id)
 
+def _extract_expiry_timestamp(inbound_data: dict) -> Optional[int]:
+    expiry_timestamp = inbound_data.get("expiryTime")
+    if expiry_timestamp:
+        return expiry_timestamp
 
-async def sync_with_servers():
-    """Периодическая синхронизация с 3x-ui: обновляет сроки, удаляет пропавшие inbound."""
-    while True:
-        users = database.get_all_users()
-        deleted = 0
-        updated = 0
+    settings_raw = inbound_data.get("settings")
+    try:
+        settings = json.loads(settings_raw) if isinstance(settings_raw, str) else settings_raw
+    except Exception:
+        logging.exception("Не удалось разобрать settings при синхронизации inbound %s", inbound_data.get("id"))
+        return None
 
+    if not isinstance(settings, dict):
+        return None
+    clients = settings.get("clients")
+    if not clients or not isinstance(clients, list):
+        return None
+    client = clients[0]
+    if isinstance(client, dict):
+        return client.get("expiryTime") or None
+    return None
+
+async def sync_users_once(remove_missing: bool = False) -> dict:
+    users = database.get_all_users_with_keys()
+    summary = {
+        "total": len(users),
+        "updated_expiry": 0,
+        "updated_keys": 0,
+        "missing": 0,
+        "removed": 0,
+        "errors": 0,
+        "skipped": 0,
+    }
+
+    async with sync_lock:
         for user in users:
-            chat_id, username, expiry_date, _, _, inbound_id, server_url = user
+            chat_id, username, vless_key, expiry_date, _, _, inbound_id, server_url = user
+            if not inbound_id or not server_url:
+                summary["skipped"] += 1
+                continue
+
             # Блокирующий запрос к 3x-ui выносим из event loop
             server_data = await asyncio.to_thread(vpn_api.get_inbound_data, inbound_id, server_url)
 
             # Если запрос упал по сети/авторизации — не трогаем запись, просто логируем и продолжаем
             if not server_data or server_data.get("_error"):
+                summary["errors"] += 1
                 logging.warning(
                     "Skip sync for chat_id=%s inbound_id=%s: %s",
                     chat_id,
@@ -221,30 +255,70 @@ async def sync_with_servers():
 
             # Явно удаляем только если сервер подтвердил, что inbound не найден
             if server_data.get("_not_found"):
-                # Не удаляем автоматически, чтобы не потерять пользователей при неверных server_url
-                logging.warning("Inbound not found for chat_id=%s inbound_id=%s on %s", chat_id, inbound_id, server_url)
+                if remove_missing:
+                    database.remove_user_local(chat_id)
+                    summary["removed"] += 1
+                else:
+                    summary["missing"] += 1
                 continue
 
-            server_expiry_timestamp = server_data.get("expiryTime")
+            server_expiry_timestamp = _extract_expiry_timestamp(server_data)
             if not server_expiry_timestamp:
+                summary["skipped"] += 1
                 logging.warning(
                     "Skip sync expiry update for chat_id=%s inbound_id=%s: no expiryTime",
                     chat_id,
                     inbound_id,
                 )
-                continue
+            else:
+                server_expiry_date = datetime.fromtimestamp(server_expiry_timestamp / 1000)
+                server_expiry_str = VPNUtils.format_expiry_date(server_expiry_date)
 
-            server_expiry_date = datetime.fromtimestamp(server_expiry_timestamp / 1000)
-            server_expiry_str = VPNUtils.format_expiry_date(server_expiry_date)
+                if expiry_date != server_expiry_str:
+                    database.update_expiry_date(chat_id, server_expiry_str)
+                    summary["updated_expiry"] += 1
 
-            if expiry_date != server_expiry_str:
-                database.update_expiry_date(chat_id, server_expiry_str)
-                updated += 1
+            new_vless_key = vpn_api.build_vless_uri(server_data, server_url)
+            if new_vless_key and new_vless_key != vless_key:
+                database.update_vless_key(chat_id, new_vless_key)
+                summary["updated_keys"] += 1
 
-        logging.info("Sync with 3x-ui: updated=%s, deleted=%s", updated, deleted)
-        if deleted or updated:
-            await notify_admin(f"🔄 Синхронизация 3x-ui: обновлено {updated}, удалено {deleted}.")
+    return summary
+
+
+async def sync_with_servers():
+    """Периодическая синхронизация с 3x-ui: обновляет сроки и ключи."""
+    while True:
+        summary = await sync_users_once(remove_missing=False)
+        logging.info(
+            "Sync with 3x-ui: updated_expiry=%s updated_keys=%s missing=%s errors=%s skipped=%s",
+            summary["updated_expiry"],
+            summary["updated_keys"],
+            summary["missing"],
+            summary["errors"],
+            summary["skipped"],
+        )
+        if summary["updated_expiry"] or summary["updated_keys"]:
+            await notify_admin(
+                "🔄 Синхронизация 3x-ui: "
+                f"обновлено сроков {summary['updated_expiry']}, "
+                f"ключей {summary['updated_keys']}."
+            )
         await asyncio.sleep(1800)
+
+
+async def run_manual_sync(notify_chat: int):
+    summary = await sync_users_once(remove_missing=True)
+    message = (
+        "🔄 Синхронизация завершена.\n"
+        f"👥 Всего пользователей: {summary['total']}\n"
+        f"✅ Обновлено сроков: {summary['updated_expiry']}\n"
+        f"🔑 Обновлено ключей: {summary['updated_keys']}\n"
+        f"🗑️ Удалено (нет inbound): {summary['removed']}\n"
+        f"⚠️ Ошибок: {summary['errors']}\n"
+        f"⏭️ Пропущено: {summary['skipped']}"
+    )
+    await bot.send_message(notify_chat, message, reply_markup=get_admin_keyboard())
 
 
 async def handle_activation_with_retries(chat_id: int):
@@ -414,6 +488,15 @@ async def admin_panel(message):
     chat_id = message.chat.id
     if chat_id in ADMIN_IDS:
         await message.answer("Добро пожаловать в админ панель", reply_markup=get_admin_keyboard())
+
+@dp.message(F.text == "Синхронизовать базу данных")
+async def sync_database(message: types.Message):
+    chat_id = message.chat.id
+    if chat_id in ADMIN_IDS:
+        await message.answer("🔄 Запускаю синхронизацию с 3x-ui. Это может занять пару минут.")
+        asyncio.create_task(run_manual_sync(chat_id))
+    else:
+        await message.answer("🚫 У вас нет доступа.")
         
 @dp.message(F.text == "Главное меню")
 async def back_to_main_menu(message: types.Message):
