@@ -25,6 +25,7 @@ from config import (
     PAYMENT_RETURN_URL,
     SHOP_API,
     SHOP_ID,
+    SUBSCRIPTION_PRICE,
     VIDEOS_DIR,
 )
 from database import VPNDatabase
@@ -191,6 +192,11 @@ async def create_payment(amount: float, chat_id: int, email: str):
         logging.exception("Ошибка создания платежа: %s", e)
         await notify_admin(f"⚠️ Ошибка создания платежа для {chat_id}: {e}")
         return None, None
+
+def _format_price_rub(amount: float) -> str:
+    if float(amount).is_integer():
+        return str(int(amount))
+    return f"{amount:.2f}"
 
 
 async def activate_subscription(chat_id: int):
@@ -443,14 +449,15 @@ async def process_email(message: types.Message, state: FSMContext):
     
     await state.clear()
     
-    amount = 179
+    amount = SUBSCRIPTION_PRICE
     payment_id, payment_link = await create_payment(amount, message.chat.id, email)
     if not payment_id or not payment_link:
         return await message.answer("❌ Не удалось создать платеж. Попробуйте позже или свяжитесь с поддержкой.")
     database.add_payment(message.chat.id, payment_id, amount)
     
+    price_label = _format_price_rub(amount)
     markup = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="💳 Оплатить (179 руб)", url=payment_link)]
+        [InlineKeyboardButton(text=f"💳 Оплатить ({price_label} руб)", url=payment_link)]
     ])
     
     await message.answer("✅ Почта сохранена!\n\n💳 Теперь вы можете оплатить подписку. После успешной оплаты чек будет отправлен на вашу почту.", reply_markup=markup)
