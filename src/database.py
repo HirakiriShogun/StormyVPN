@@ -104,6 +104,10 @@ class VPNDatabase:
             SET username = EXCLUDED.username,
                 vless_key = EXCLUDED.vless_key,
                 expiry_date = EXCLUDED.expiry_date,
+                reminder_sent = CASE
+                    WHEN users.expiry_date IS DISTINCT FROM EXCLUDED.expiry_date THEN FALSE
+                    ELSE users.reminder_sent
+                END,
                 inbound_id = EXCLUDED.inbound_id,
                 server_url = EXCLUDED.server_url
             """,

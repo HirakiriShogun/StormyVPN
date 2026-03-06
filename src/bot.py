@@ -165,22 +165,48 @@ async def simulate_activity():
 
 async def check_subscriptions():
     while True:
-        now = datetime.now()
-        users = database.get_all_users()
+        try:
+            now = datetime.now()
+            users = database.get_all_users()
 
-        for chat_id, username, expiry_date, reminder_sent, gift_used, _, _ in users:
-            expiry_dt = datetime.strptime(expiry_date, "%d.%m.%Y %H:%M")
-            time_left = (expiry_dt - now).total_seconds()
+            for chat_id, username, expiry_date, reminder_sent, gift_used, _, _ in users:
+                try:
+                    expiry_dt = datetime.strptime(expiry_date, "%d.%m.%Y %H:%M")
+                except Exception as e:
+                    logging.warning(
+                        "Некорректная дата подписки для chat_id=%s: %s (%s)",
+                        chat_id,
+                        expiry_date,
+                        e,
+                    )
+                    continue
 
-            if time_left <= 0:
-                success = database.remove_user(chat_id)
-                await bot.send_message(chat_id, "⏳ Ваша подписка на StormyVPN истекла. Продлите её, чтобы продолжить пользоваться услугами! 🔑")
-                if not success:
-                    print(f"⚠️ Не удалось удалить {chat_id} — будет повторено через 30 мин.")
-                
-            elif time_left < 86400 and not reminder_sent:
-                await bot.send_message(chat_id, "⚠️ Ваша подписка скоро истекает! Продлите её, чтобы не потерять доступ к StormyVPN. 🚀")
-                database.mark_reminder_sent(chat_id)
+                time_left = (expiry_dt - now).total_seconds()
+
+                if time_left <= 0:
+                    success = database.remove_user(chat_id)
+                    try:
+                        await bot.send_message(
+                            chat_id,
+                            "⏳ Ваша подписка на StormyVPN истекла. Продлите её, чтобы продолжить пользоваться услугами! 🔑",
+                        )
+                    except Exception as e:
+                        logging.warning("Не удалось отправить сообщение об окончании подписки chat_id=%s: %s", chat_id, e)
+                    if not success:
+                        logging.warning("Не удалось удалить chat_id=%s — повторим позже.", chat_id)
+
+                elif time_left < 86400 and not reminder_sent:
+                    try:
+                        await bot.send_message(
+                            chat_id,
+                            "⚠️ Ваша подписка скоро истекает! Продлите её, чтобы не потерять доступ к StormyVPN. 🚀",
+                        )
+                        database.mark_reminder_sent(chat_id)
+                    except Exception as e:
+                        logging.warning("Не удалось отправить reminder chat_id=%s: %s", chat_id, e)
+
+        except Exception as e:
+            logging.exception("Ошибка в check_subscriptions: %s", e)
 
         await asyncio.sleep(1800)
 
