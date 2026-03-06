@@ -338,11 +338,16 @@ async def sync_with_servers():
 
 
 def _build_sync_confirm_keyboard(token: str, missing_count: int) -> InlineKeyboardMarkup:
+    yes_text = (
+        f"✅ Да, удалить {missing_count}"
+        if missing_count > 0
+        else "✅ Да, применить синхронизацию"
+    )
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text=f"✅ Да, удалить {missing_count}",
+                    text=yes_text,
                     callback_data=f"sync_confirm_yes:{token}",
                 )
             ],
@@ -364,20 +369,6 @@ def _is_sync_confirm_expired(created_at: Optional[datetime]) -> bool:
 
 async def run_manual_sync_preview(notify_chat: int):
     summary = await sync_users_once(remove_missing=False, preview_only=True)
-    if summary["missing"] <= 0:
-        pending_sync_confirmations.pop(notify_chat, None)
-        message = (
-            "🔄 Проверка синхронизации завершена.\n"
-            f"👥 Всего пользователей: {summary['total']}\n"
-            f"✅ Обновлено сроков: {summary['updated_expiry']}\n"
-            f"🔑 Обновлено ключей: {summary['updated_keys']}\n"
-            f"🔀 Переназначено серверов: {summary['relocated']}\n"
-            f"🗑️ К удалению: 0\n"
-            f"⚠️ Ошибок: {summary['errors']}\n"
-            f"⏭️ Пропущено: {summary['skipped']}"
-        )
-        await bot.send_message(notify_chat, message, reply_markup=get_admin_keyboard())
-        return
 
     token = f"{notify_chat}:{int(datetime.now().timestamp())}"
     pending_sync_confirmations[notify_chat] = {
@@ -385,6 +376,11 @@ async def run_manual_sync_preview(notify_chat: int):
         "created_at": datetime.now(),
         "missing": summary["missing"],
     }
+    confirm_line = (
+        "Подтвердить удаление этих пользователей?"
+        if summary["missing"] > 0
+        else "Подтвердить применение синхронизации? (удалений не будет)"
+    )
     message = (
         "🔄 Предпросмотр синхронизации завершён.\n"
         f"👥 Всего пользователей: {summary['total']}\n"
@@ -394,7 +390,7 @@ async def run_manual_sync_preview(notify_chat: int):
         f"🗑️ К удалению (inbound не найден): {summary['missing']}\n"
         f"⚠️ Ошибок: {summary['errors']}\n"
         f"⏭️ Пропущено: {summary['skipped']}\n\n"
-        "Подтвердить удаление этих пользователей?"
+        f"{confirm_line}"
     )
     await bot.send_message(
         notify_chat,
