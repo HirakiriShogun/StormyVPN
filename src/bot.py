@@ -126,6 +126,8 @@ database = VPNDatabase()
 payment_service = PaymentService(SHOP_ID, SHOP_API, PAYMENT_RETURN_URL)
 subscription_service = SubscriptionService(database, vpn_api)
 sync_lock = asyncio.Lock()
+SYNC_CONFIRM_TTL_SECONDS = 600
+pending_sync_confirmations: dict[int, dict[str, Any]] = {}
 
 async def simulate_activity():
     while True:
@@ -226,12 +228,13 @@ def _extract_expiry_timestamp(inbound_data: dict) -> Optional[int]:
         return client.get("expiryTime") or None
     return None
 
-async def sync_users_once(remove_missing: bool = False) -> dict:
+async def sync_users_once(remove_missing: bool = False, preview_only: bool = False) -> dict:
     users = database.get_all_users_with_keys()
     summary = {
         "total": len(users),
         "updated_expiry": 0,
         "updated_keys": 0,
+        "relocated": 0,
         "missing": 0,
         "removed": 0,
         "errors": 0,
@@ -261,12 +264,30 @@ async def sync_users_once(remove_missing: bool = False) -> dict:
 
             # Явно удаляем только если сервер подтвердил, что inbound не найден
             if server_data.get("_not_found"):
-                if remove_missing:
-                    database.remove_user_local(chat_id)
-                    summary["removed"] += 1
+                alt_data, alt_server_url = await asyncio.to_thread(
+                    vpn_api.find_inbound_on_other_servers, inbound_id, server_url
+                )
+                if alt_data and alt_server_url:
+                    logging.warning(
+                        "Sync relocation: chat_id=%s inbound_id=%s moved from %s to %s",
+                        chat_id,
+                        inbound_id,
+                        server_url,
+                        alt_server_url,
+                    )
+                    server_data = alt_data
+                    if alt_server_url != server_url:
+                        if not preview_only:
+                            database.update_user_binding(chat_id, inbound_id, alt_server_url)
+                        server_url = alt_server_url
+                        summary["relocated"] += 1
                 else:
-                    summary["missing"] += 1
-                continue
+                    if remove_missing and not preview_only:
+                        database.remove_user_local(chat_id)
+                        summary["removed"] += 1
+                    else:
+                        summary["missing"] += 1
+                    continue
 
             server_expiry_timestamp = _extract_expiry_timestamp(server_data)
             if not server_expiry_timestamp:
@@ -281,12 +302,14 @@ async def sync_users_once(remove_missing: bool = False) -> dict:
                 server_expiry_str = VPNUtils.format_expiry_date(server_expiry_date)
 
                 if expiry_date != server_expiry_str:
-                    database.update_expiry_date(chat_id, server_expiry_str)
+                    if not preview_only:
+                        database.update_expiry_date(chat_id, server_expiry_str)
                     summary["updated_expiry"] += 1
 
             new_vless_key = vpn_api.build_vless_uri(server_data, server_url)
             if new_vless_key and new_vless_key != vless_key:
-                database.update_vless_key(chat_id, new_vless_key)
+                if not preview_only:
+                    database.update_vless_key(chat_id, new_vless_key)
                 summary["updated_keys"] += 1
 
     return summary
@@ -297,9 +320,10 @@ async def sync_with_servers():
     while True:
         summary = await sync_users_once(remove_missing=False)
         logging.info(
-            "Sync with 3x-ui: updated_expiry=%s updated_keys=%s missing=%s errors=%s skipped=%s",
+            "Sync with 3x-ui: updated_expiry=%s updated_keys=%s relocated=%s missing=%s errors=%s skipped=%s",
             summary["updated_expiry"],
             summary["updated_keys"],
+            summary["relocated"],
             summary["missing"],
             summary["errors"],
             summary["skipped"],
@@ -313,6 +337,72 @@ async def sync_with_servers():
         await asyncio.sleep(1800)
 
 
+def _build_sync_confirm_keyboard(token: str, missing_count: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=f"✅ Да, удалить {missing_count}",
+                    callback_data=f"sync_confirm_yes:{token}",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="❌ Нет, отмена",
+                    callback_data=f"sync_confirm_no:{token}",
+                )
+            ],
+        ]
+    )
+
+
+def _is_sync_confirm_expired(created_at: Optional[datetime]) -> bool:
+    if not created_at:
+        return True
+    return (datetime.now() - created_at).total_seconds() > SYNC_CONFIRM_TTL_SECONDS
+
+
+async def run_manual_sync_preview(notify_chat: int):
+    summary = await sync_users_once(remove_missing=False, preview_only=True)
+    if summary["missing"] <= 0:
+        pending_sync_confirmations.pop(notify_chat, None)
+        message = (
+            "🔄 Проверка синхронизации завершена.\n"
+            f"👥 Всего пользователей: {summary['total']}\n"
+            f"✅ Обновлено сроков: {summary['updated_expiry']}\n"
+            f"🔑 Обновлено ключей: {summary['updated_keys']}\n"
+            f"🔀 Переназначено серверов: {summary['relocated']}\n"
+            f"🗑️ К удалению: 0\n"
+            f"⚠️ Ошибок: {summary['errors']}\n"
+            f"⏭️ Пропущено: {summary['skipped']}"
+        )
+        await bot.send_message(notify_chat, message, reply_markup=get_admin_keyboard())
+        return
+
+    token = f"{notify_chat}:{int(datetime.now().timestamp())}"
+    pending_sync_confirmations[notify_chat] = {
+        "token": token,
+        "created_at": datetime.now(),
+        "missing": summary["missing"],
+    }
+    message = (
+        "🔄 Предпросмотр синхронизации завершён.\n"
+        f"👥 Всего пользователей: {summary['total']}\n"
+        f"✅ Обновлено сроков: {summary['updated_expiry']}\n"
+        f"🔑 Обновлено ключей: {summary['updated_keys']}\n"
+        f"🔀 Переназначено серверов: {summary['relocated']}\n"
+        f"🗑️ К удалению (inbound не найден): {summary['missing']}\n"
+        f"⚠️ Ошибок: {summary['errors']}\n"
+        f"⏭️ Пропущено: {summary['skipped']}\n\n"
+        "Подтвердить удаление этих пользователей?"
+    )
+    await bot.send_message(
+        notify_chat,
+        message,
+        reply_markup=_build_sync_confirm_keyboard(token, summary["missing"]),
+    )
+
+
 async def run_manual_sync(notify_chat: int):
     summary = await sync_users_once(remove_missing=True)
     message = (
@@ -320,6 +410,7 @@ async def run_manual_sync(notify_chat: int):
         f"👥 Всего пользователей: {summary['total']}\n"
         f"✅ Обновлено сроков: {summary['updated_expiry']}\n"
         f"🔑 Обновлено ключей: {summary['updated_keys']}\n"
+        f"🔀 Переназначено серверов: {summary['relocated']}\n"
         f"🗑️ Удалено (нет inbound): {summary['removed']}\n"
         f"⚠️ Ошибок: {summary['errors']}\n"
         f"⏭️ Пропущено: {summary['skipped']}"
@@ -500,10 +591,55 @@ async def admin_panel(message):
 async def sync_database(message: types.Message):
     chat_id = message.chat.id
     if chat_id in ADMIN_IDS:
-        await message.answer("🔄 Запускаю синхронизацию с 3x-ui. Это может занять пару минут.")
-        asyncio.create_task(run_manual_sync(chat_id))
+        await message.answer("🔄 Запускаю проверку 3x-ui. Сначала покажу, сколько пользователей будет удалено.")
+        asyncio.create_task(run_manual_sync_preview(chat_id))
     else:
         await message.answer("🚫 У вас нет доступа.")
+
+
+@dp.callback_query(F.data.startswith("sync_confirm_yes:"))
+async def confirm_sync_yes(call: types.CallbackQuery):
+    chat_id = call.message.chat.id if call.message else call.from_user.id
+    token = call.data.split(":", 1)[1] if call.data else ""
+    pending = pending_sync_confirmations.get(chat_id)
+    if not pending or pending.get("token") != token:
+        await call.answer("Подтверждение устарело. Запусти синхронизацию снова.", show_alert=True)
+        return
+
+    if _is_sync_confirm_expired(pending.get("created_at")):
+        pending_sync_confirmations.pop(chat_id, None)
+        await call.answer("Время подтверждения истекло. Запусти синхронизацию снова.", show_alert=True)
+        return
+
+    pending_sync_confirmations.pop(chat_id, None)
+    try:
+        await call.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        logging.exception("Не удалось убрать кнопки подтверждения sync_confirm_yes")
+
+    await call.answer("Подтверждено")
+    await bot.send_message(
+        chat_id,
+        "✅ Подтверждение принято. Запускаю удаление пользователей, которых нет в 3x-ui.",
+    )
+    asyncio.create_task(run_manual_sync(chat_id))
+
+
+@dp.callback_query(F.data.startswith("sync_confirm_no:"))
+async def confirm_sync_no(call: types.CallbackQuery):
+    chat_id = call.message.chat.id if call.message else call.from_user.id
+    token = call.data.split(":", 1)[1] if call.data else ""
+    pending = pending_sync_confirmations.get(chat_id)
+    if pending and pending.get("token") == token:
+        pending_sync_confirmations.pop(chat_id, None)
+
+    try:
+        await call.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        logging.exception("Не удалось убрать кнопки подтверждения sync_confirm_no")
+
+    await call.answer("Удаление отменено")
+    await bot.send_message(chat_id, "❌ Удаление отменено. Данные не удалялись.", reply_markup=get_admin_keyboard())
         
 @dp.message(F.text == "Главное меню")
 async def back_to_main_menu(message: types.Message):

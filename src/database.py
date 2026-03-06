@@ -160,6 +160,12 @@ class VPNDatabase:
     def update_vless_key(self, chat_id, vless_key):
         self.execute_query("UPDATE users SET vless_key=%s WHERE chat_id=%s", (vless_key, chat_id))
 
+    def update_user_binding(self, chat_id, inbound_id, server_url):
+        self.execute_query(
+            "UPDATE users SET inbound_id=%s, server_url=%s WHERE chat_id=%s",
+            (inbound_id, server_url, chat_id),
+        )
+
     def get_subscription_status(self, chat_id):
         result = self.execute_query(
             "SELECT expiry_date FROM users WHERE chat_id=%s",

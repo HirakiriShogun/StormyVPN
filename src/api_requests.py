@@ -22,54 +22,56 @@ logger = logging.getLogger(__name__)
 def _normalize_url(url: str) -> str:
     return url.rstrip('/') if url else url
 
-def _has_cookie(session, server_url: str) -> bool:
-    """Проверяем, есть ли cookie для этого хоста в сессии."""
-    from urllib.parse import urlparse
-    try:
-        host = urlparse(server_url).hostname
-    except Exception:
-        host = None
-    if not host:
-        return False
-    jar = session.cookies
-    return jar.get(SESSION_COOKIE_NAME, domain=host) is not None
+def _has_cookie(session) -> bool:
+    """Проверяем, есть ли нужная auth-cookie в сессии."""
+    return any(cookie.name == SESSION_COOKIE_NAME for cookie in session.cookies)
 
 class VPNApi:
     def __init__(self, servers: Optional[List[Dict[str, Any]]] = None):
-        self.session = requests.Session()
+        self.sessions: Dict[str, requests.Session] = {}
         self.active_server = None
-        self.session_cookie = None
         self.servers = servers or SERVERS
 
+    def _get_session(self, server_url: str) -> requests.Session:
+        server_key = _normalize_url(server_url)
+        if server_key not in self.sessions:
+            self.sessions[server_key] = requests.Session()
+        return self.sessions[server_key]
+
+    def _find_server(self, server_url: str) -> Optional[Dict[str, Any]]:
+        target_url = _normalize_url(server_url)
+        return next((s for s in self.servers if _normalize_url(s["url"]) == target_url), None)
+
     def authenticate_server(self, server):
+        server = server.copy()
+        server["url"] = _normalize_url(server["url"])
+        session = self._get_session(server["url"])
         login_data = {"username": server["username"], "password": server["password"]}
         print(f"[auth] try {server['url']} as {server['username']}", flush=True)
         try:
             login_url = f"{server['url']}/login/"
-            response = self.session.post(
+            response = session.post(
                 login_url, data=login_data, verify=False, timeout=15
             )
             print(f"[auth-urlencoded] {server['url']} status={response.status_code} cookies={list(response.cookies.keys())}", flush=True)
             if response.text:
                 print(f"[auth-urlencoded-body] {response.text[:200]}", flush=True)
 
-            cookie = response.cookies.get(SESSION_COOKIE_NAME)
+            cookie = response.cookies.get(SESSION_COOKIE_NAME) or session.cookies.get(SESSION_COOKIE_NAME)
             if response.status_code == 200 and cookie:
-                self.session_cookie = cookie
                 print(f"[auth] success urlencoded {server['url']} cookie={SESSION_COOKIE_NAME}", flush=True)
                 return True
 
             files = {k: (None, v) for k, v in login_data.items()}
-            response2 = self.session.post(
+            response2 = session.post(
                 login_url, files=files, verify=False, timeout=15
             )
             print(f"[auth-multipart] {server['url']} status={response2.status_code} cookies={list(response2.cookies.keys())}", flush=True)
             if response2.text:
                 print(f"[auth-multipart-body] {response2.text[:200]}", flush=True)
 
-            cookie2 = response2.cookies.get(SESSION_COOKIE_NAME)
+            cookie2 = response2.cookies.get(SESSION_COOKIE_NAME) or session.cookies.get(SESSION_COOKIE_NAME)
             if response2.status_code == 200 and cookie2:
-                self.session_cookie = cookie2
                 print(f"[auth] success multipart {server['url']} cookie={SESSION_COOKIE_NAME}", flush=True)
                 return True
 
@@ -79,13 +81,18 @@ class VPNApi:
         return False
 
     def check_server_load(self, server):
+        session = self._get_session(server["url"])
         headers = {
             "Content-Type": "application/json",
             "Accept": "application/json",
-            "Cookie": f"{SESSION_COOKIE_NAME}={self.session_cookie}"
         }
         try:
-            response = self.session.get(f"{server['url']}/panel/api/inbounds/list/", headers=headers, verify=False)
+            response = session.get(
+                f"{server['url']}/panel/api/inbounds/list/",
+                headers=headers,
+                verify=False,
+                timeout=15,
+            )
             if response.status_code == 200:
                 data = response.json()
                 if data["success"]:
@@ -102,7 +109,6 @@ class VPNApi:
             return None
 
         self.active_server = None
-        self.session_cookie = None
         best_server = None
         min_load = float('inf')
 
@@ -195,8 +201,16 @@ class VPNApi:
         }
         
         try:
-            response = self.session.post(f"{self.active_server['url']}/panel/api/inbounds/add/",
-                                         json=client_data, verify=False)
+            session = self._get_session(self.active_server["url"])
+            if not _has_cookie(session) and not self.authenticate_server(self.active_server):
+                print(f"Failed to authenticate active server: {self.active_server['url']}")
+                return None
+            response = session.post(
+                f"{self.active_server['url']}/panel/api/inbounds/add/",
+                json=client_data,
+                verify=False,
+                timeout=15,
+            )
             if response.status_code == 200:
                 status_obj = response.json()["msg"]
                 print(status_obj)
@@ -285,8 +299,7 @@ class VPNApi:
         return f"vless://{client_id}@{server_host}:{port}?{query}#{tag}"
 
     def remove_user(self, inbound_id, server_url):
-        target_url = _normalize_url(server_url)
-        server = next((s for s in self.servers if _normalize_url(s["url"]) == target_url), None)
+        server = self._find_server(server_url)
         
         if not server:
             print(f"Сервер с URL {server_url} не найден в списке.")
@@ -297,8 +310,9 @@ class VPNApi:
             return None
 
         try:
+            session = self._get_session(server["url"])
             url = f"{server['url']}/panel/api/inbounds/del/{inbound_id}/"
-            delete_response = self.session.post(url, verify=False)
+            delete_response = session.post(url, verify=False, timeout=15)
             
             if delete_response.status_code == 200:
                 print(f"Пользователь с inbound_id {inbound_id} успешно удалён с {server_url}")
@@ -311,8 +325,7 @@ class VPNApi:
             return None
         
     def renew_vpn(self, inbound_id, server_url, new_expiry_time):
-        target_url = _normalize_url(server_url)
-        server = next((s for s in self.servers if _normalize_url(s["url"]) == target_url), None)
+        server = self._find_server(server_url)
         if not server:
             print(f"❌ Ошибка: Сервер {server_url} не найден!")
             return False
@@ -321,15 +334,15 @@ class VPNApi:
             print(f"❌ Ошибка авторизации на сервере {server_url}. Продление невозможно.")
             return False
 
+        session = self._get_session(server["url"])
         headers = {
             "Content-Type": "application/json",
             "Accept": "application/json",
-            "Cookie": f"{SESSION_COOKIE_NAME}={self.session_cookie}"
         }
 
         try:
             # Получаем текущие данные inbound
-            response = self.session.get(
+            response = session.get(
                 f"{server['url']}/panel/api/inbounds/get/{inbound_id}/",
                 headers=headers, verify=False
             )
@@ -354,7 +367,7 @@ class VPNApi:
             inbound_data["settings"] = json.dumps(settings)
 
             # Обновляем объект на сервере
-            update_response = self.session.post(
+            update_response = session.post(
                 f"{server['url']}/panel/api/inbounds/update/{inbound_id}/",
                 json=inbound_data, headers=headers, verify=False
             )
@@ -376,13 +389,13 @@ class VPNApi:
 
     def get_inbound_data(self, inbound_id, server_url):
         """Возвращает inbound данные или словарь с ключами _error/_not_found."""
-        target_url = _normalize_url(server_url)
-        server = next((s for s in self.servers if _normalize_url(s["url"]) == target_url), None)
+        server = self._find_server(server_url)
         if not server:
             print(f"❌ Ошибка: Сервер {server_url} не найден!")
             return {"_error": "server_not_configured"}
 
-        need_auth = not _has_cookie(self.session, server["url"])
+        session = self._get_session(server["url"])
+        need_auth = not _has_cookie(session)
         if need_auth:
             if not self.authenticate_server(server):
                 print(f"❌ Ошибка авторизации на сервере {server_url}.")
@@ -391,17 +404,15 @@ class VPNApi:
         headers = {
             "Content-Type": "application/json",
             "Accept": "application/json",
-            "Cookie": f"{SESSION_COOKIE_NAME}={self.session_cookie}",
         }
 
         try:
             url = f"{server['url']}/panel/api/inbounds/get/{inbound_id}/"
-            response = self.session.get(url, headers=headers, verify=False, timeout=10)
+            response = session.get(url, headers=headers, verify=False, timeout=10)
             if response.status_code in (401, 403) and not need_auth:
                 # Переавторизуемся один раз при просрочке cookie
                 if self.authenticate_server(server):
-                    headers["Cookie"] = f"{SESSION_COOKIE_NAME}={self.session_cookie}"
-                    response = self.session.get(url, headers=headers, verify=False, timeout=10)
+                    response = session.get(url, headers=headers, verify=False, timeout=10)
         except requests.exceptions.RequestException as e:
             print(f"❌ Ошибка при запросе inbound: {e}")
             return {"_error": f"request_error: {e}"}
@@ -410,8 +421,16 @@ class VPNApi:
             return {"_error": f"unexpected_error: {e}"}
 
         if response.status_code == 404:
-            print(f"❌ inbound_id {inbound_id} не найден на {server_url}")
-            return {"_not_found": True}
+            # Защита от ложного 404 из-за протухшей/неподходящей сессии: один принудительный re-auth + retry.
+            if not self.authenticate_server(server):
+                return {"_error": "auth_failed_after_404"}
+            try:
+                response = session.get(url, headers=headers, verify=False, timeout=10)
+            except requests.exceptions.RequestException as e:
+                return {"_error": f"request_error_after_reauth: {e}"}
+            if response.status_code == 404:
+                print(f"❌ inbound_id {inbound_id} не найден на {server_url}")
+                return {"_not_found": True}
         if response.status_code != 200:
             print(f"❌ Ошибка получения inbound: {response.status_code} - {response.text}")
             return {"_error": f"status_{response.status_code}"}
@@ -434,10 +453,27 @@ class VPNApi:
             return {"_error": "empty_response"}
 
         return inbound_obj  # Возвращаем актуальные данные
+
+    def find_inbound_on_other_servers(self, inbound_id, exclude_server_url):
+        """Пробует найти inbound на других серверах, кроме исходного."""
+        excluded = _normalize_url(exclude_server_url)
+        for server in self.servers:
+            server_url = _normalize_url(server["url"])
+            if server_url == excluded:
+                continue
+
+            inbound_data = self.get_inbound_data(inbound_id, server_url)
+            if not inbound_data or not isinstance(inbound_data, dict):
+                continue
+            if inbound_data.get("_error") or inbound_data.get("_not_found"):
+                continue
+            return inbound_data, server_url
+
+        return None, None
         
     def scan_all_inbounds(self, server_url):
         """Сканирует все возможные inbound_id на сервере (от 50 до 210)"""
-        server = next((s for s in self.servers if s["url"] == server_url), None)
+        server = self._find_server(server_url)
         if not server:
             print(f"❌ Ошибка: Сервер {server_url} не найден!")
             return []
@@ -446,17 +482,17 @@ class VPNApi:
             print(f"❌ Ошибка авторизации на сервере {server_url}.")
             return []
 
+        session = self._get_session(server["url"])
         headers = {
             "Content-Type": "application/json",
             "Accept": "application/json",
-            "Cookie": f"{SESSION_COOKIE_NAME}={self.session_cookie}"
         }
 
         found_inbounds = []
         
         for inbound_id in range(50, 211):  # от 50 до 210 включительно
             try:
-                response = self.session.get(
+                response = session.get(
                     f"{server['url']}/panel/api/inbounds/get/{inbound_id}/",
                     headers=headers, 
                     verify=False,
