@@ -541,8 +541,39 @@ async def start_aliases(message: types.Message):
     
 @dp.message(F.text.in_(["Оформить VPN 💳", "Продлить VPN 🔑"]))
 async def ask_for_email(message: types.Message, state: FSMContext):
-    await message.answer("📩 По 54-ФЗ мы обязаны отправить вам чек. Пожалуйста, введите вашу почту для получения квитанции. ✉️\n\n❌ Или напишите Отмена для выхода в Главное меню")
+    cancel_markup = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="❌ Отмена", callback_data="email_cancel")]
+        ]
+    )
+    await message.answer(
+        "📩 По 54-ФЗ мы обязаны отправить вам чек. Пожалуйста, введите вашу почту для получения квитанции. ✉️\n\n"
+        "❌ Нажмите кнопку Отмена ниже для выхода в Главное меню",
+        reply_markup=cancel_markup,
+    )
     await state.set_state(EmailState.waiting_for_email)
+
+
+@dp.callback_query(F.data == "email_cancel")
+async def cancel_email_input(call: types.CallbackQuery, state: FSMContext):
+    current_state = await state.get_state()
+    if current_state != EmailState.waiting_for_email.state:
+        await call.answer("Отмена уже неактуальна")
+        return
+
+    await state.clear()
+    chat_id = call.message.chat.id if call.message else call.from_user.id
+    status = database.get_subscription_status(chat_id)
+    reply_kb = get_main_keyboard(status, chat_id in ADMIN_IDS)
+
+    try:
+        if call.message:
+            await call.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        logging.exception("Не удалось убрать inline-кнопку отмены email")
+
+    await call.answer("Ввод email отменён")
+    await bot.send_message(chat_id, "❌ Ввод email отменён.", reply_markup=reply_kb)
 
 
 @dp.message(EmailState.waiting_for_email)
