@@ -129,6 +129,22 @@ sync_lock = asyncio.Lock()
 SYNC_CONFIRM_TTL_SECONDS = 600
 pending_sync_confirmations: dict[int, dict[str, Any]] = {}
 
+
+def _log_background_task_result(task: asyncio.Task) -> None:
+    try:
+        task.result()
+    except asyncio.CancelledError:
+        return
+    except Exception:
+        logging.exception("Фоновая задача '%s' завершилась с ошибкой.", task.get_name())
+
+
+def create_background_task(coro: Awaitable[Any], name: str) -> asyncio.Task:
+    task = asyncio.create_task(coro, name=name)
+    task.add_done_callback(_log_background_task_result)
+    return task
+
+
 async def simulate_activity():
     while True:
         try:
@@ -471,21 +487,37 @@ async def handle_activation_with_retries(chat_id: int):
 
 async def check_payment_status():
     while True:
-        pending_payments = database.get_pending_payments()
+        try:
+            pending_payments = database.get_pending_payments()
 
-        for payment_id, chat_id in pending_payments:
-            status = payment_service.get_payment_status(payment_id)
-            if status is None:
-                continue
+            for payment_id, chat_id in pending_payments:
+                try:
+                    status = await asyncio.to_thread(payment_service.get_payment_status, payment_id)
+                except Exception as e:
+                    logging.exception(
+                        "Ошибка проверки статуса платежа payment_id=%s, chat_id=%s: %s",
+                        payment_id,
+                        chat_id,
+                        e,
+                    )
+                    continue
 
-            if status == "succeeded":
-                database.update_payment_status(payment_id, "succeeded")
-                asyncio.create_task(handle_activation_with_retries(chat_id))
-                database.remove_payment(payment_id)
+                if status is None:
+                    continue
 
-            elif status in ["canceled", "failed"]:
-                database.update_payment_status(payment_id, status)
-                database.remove_payment(payment_id)
+                if status == "succeeded":
+                    database.update_payment_status(payment_id, "succeeded")
+                    create_background_task(
+                        handle_activation_with_retries(chat_id),
+                        name=f"activation_after_payment_{chat_id}",
+                    )
+                    database.remove_payment(payment_id)
+
+                elif status in ["canceled", "failed"]:
+                    database.update_payment_status(payment_id, status)
+                    database.remove_payment(payment_id)
+        except Exception as e:
+            logging.exception("Критическая ошибка в цикле check_payment_status: %s", e)
 
         await asyncio.sleep(10)
 
@@ -645,7 +677,7 @@ async def sync_database(message: types.Message):
     chat_id = message.chat.id
     if chat_id in ADMIN_IDS:
         await message.answer("🔄 Запускаю проверку 3x-ui. Сначала покажу, сколько пользователей будет удалено.")
-        asyncio.create_task(run_manual_sync_preview(chat_id))
+        create_background_task(run_manual_sync_preview(chat_id), name=f"manual_sync_preview_{chat_id}")
     else:
         await message.answer("🚫 У вас нет доступа.")
 
@@ -675,7 +707,7 @@ async def confirm_sync_yes(call: types.CallbackQuery):
         chat_id,
         "✅ Подтверждение принято. Запускаю удаление пользователей, которых нет в 3x-ui.",
     )
-    asyncio.create_task(run_manual_sync(chat_id))
+    create_background_task(run_manual_sync(chat_id), name=f"manual_sync_{chat_id}")
 
 
 @dp.callback_query(F.data.startswith("sync_confirm_no:"))
@@ -950,7 +982,7 @@ async def process_gift_days(message: types.Message, state: FSMContext):
 
     await state.clear()
     await message.answer(f"🎁 Продлеваем подписку всем на {days} дней... Это может занять пару минут.")
-    asyncio.create_task(add_days_to_all_users(days, chat_id))
+    create_background_task(add_days_to_all_users(days, chat_id), name=f"gift_days_{chat_id}")
 
 
 async def add_days_to_all_users(days: int, notify_chat: int):
@@ -1002,11 +1034,11 @@ async def add_days_to_all_users(days: int, notify_chat: int):
     
 
 async def start_bot():
-    asyncio.create_task(simulate_activity())
+    create_background_task(simulate_activity(), name="simulate_activity")
     if not MAINTENANCE_MODE:
-        asyncio.create_task(check_payment_status())
-        asyncio.create_task(check_subscriptions())
-        asyncio.create_task(sync_with_servers())
+        create_background_task(check_payment_status(), name="check_payment_status")
+        create_background_task(check_subscriptions(), name="check_subscriptions")
+        create_background_task(sync_with_servers(), name="sync_with_servers")
     else:
         logging.info("MAINTENANCE_MODE enabled: skipping subscription/payment background tasks.")
     await dp.start_polling(bot, skip_updates=True)
