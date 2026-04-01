@@ -26,10 +26,16 @@ from config import (
     SHOP_API,
     SHOP_ID,
     SUBSCRIPTION_PRICE,
+    SUBSCRIPTION_PRICE_3_MONTHS,
     VIDEOS_DIR,
 )
 from database import VPNDatabase
-from keyboards import get_admin_keyboard, get_main_keyboard, get_vpn_guide_keyboard
+from keyboards import (
+    get_admin_keyboard,
+    get_main_keyboard,
+    get_subscription_period_keyboard,
+    get_vpn_guide_keyboard,
+)
 from services.payment_service import PaymentService
 from services.subscription_service import SubscriptionService
 from states import AdminState, EmailState
@@ -229,9 +235,21 @@ async def check_subscriptions():
 async def get_user_subscription_status(chat_id):
     return database.get_subscription_status(chat_id)
 
-async def create_payment(amount: float, chat_id: int, email: str):
+def _get_subscription_amount(subscription_days: int) -> float:
+    if subscription_days == 90:
+        return SUBSCRIPTION_PRICE_3_MONTHS
+    return SUBSCRIPTION_PRICE
+
+
+def _get_subscription_label(subscription_days: int) -> str:
+    if subscription_days == 90:
+        return "3 месяца"
+    return "1 месяц"
+
+
+async def create_payment(amount: float, chat_id: int, email: str, subscription_days: int):
     try:
-        return payment_service.create_payment(amount, chat_id, email)
+        return payment_service.create_payment(amount, chat_id, email, subscription_days)
     except Exception as e:
         logging.exception("Ошибка создания платежа: %s", e)
         await notify_admin(f"⚠️ Ошибка создания платежа для {chat_id}: {e}")
@@ -243,8 +261,8 @@ def _format_price_rub(amount: float) -> str:
     return f"{amount:.2f}"
 
 
-async def activate_subscription(chat_id: int):
-    success = await subscription_service.activate_or_extend(chat_id, bot)
+async def activate_subscription(chat_id: int, subscription_days: int = 30):
+    success = await subscription_service.activate_or_extend(chat_id, bot, subscription_days)
     if success:
         await how_to_use_auto(chat_id)
 
@@ -456,12 +474,12 @@ async def run_manual_sync(notify_chat: int):
     await bot.send_message(notify_chat, message, reply_markup=get_admin_keyboard())
 
 
-async def handle_activation_with_retries(chat_id: int):
+async def handle_activation_with_retries(chat_id: int, subscription_days: int):
     """Пробует активировать/продлить до 3 раз с интервалом 60 сек."""
     max_attempts = 3
     delay_seconds = 60
     for attempt in range(1, max_attempts + 1):
-        success = await subscription_service.activate_or_extend(chat_id, bot)
+        success = await subscription_service.activate_or_extend(chat_id, bot, subscription_days)
         if success:
             await how_to_use_auto(chat_id)
             return
@@ -490,7 +508,7 @@ async def check_payment_status():
         try:
             pending_payments = database.get_pending_payments()
 
-            for payment_id, chat_id in pending_payments:
+            for payment_id, chat_id, subscription_days in pending_payments:
                 try:
                     status = await asyncio.to_thread(payment_service.get_payment_status, payment_id)
                 except Exception as e:
@@ -508,7 +526,7 @@ async def check_payment_status():
                 if status == "succeeded":
                     database.update_payment_status(payment_id, "succeeded")
                     create_background_task(
-                        handle_activation_with_retries(chat_id),
+                        handle_activation_with_retries(chat_id, subscription_days),
                         name=f"activation_after_payment_{chat_id}",
                     )
                     database.remove_payment(payment_id)
@@ -573,23 +591,77 @@ async def start_aliases(message: types.Message):
     
 @dp.message(F.text.in_(["Оформить VPN 💳", "Продлить VPN 🔑"]))
 async def ask_for_email(message: types.Message, state: FSMContext):
+    await message.answer(
+        "Выберите срок подписки:",
+        reply_markup=get_subscription_period_keyboard(),
+    )
+    await state.set_state(EmailState.waiting_for_subscription_period)
+
+
+@dp.callback_query(StateFilter(EmailState.waiting_for_subscription_period), F.data == "subscription_period_cancel")
+async def cancel_subscription_period(call: types.CallbackQuery, state: FSMContext):
+    await state.clear()
+    chat_id = call.message.chat.id if call.message else call.from_user.id
+    status = database.get_subscription_status(chat_id)
+    reply_kb = get_main_keyboard(status, chat_id in ADMIN_IDS)
+
+    try:
+        if call.message:
+            await call.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        logging.exception("Не удалось убрать inline-кнопки выбора срока")
+
+    await call.answer("Выбор срока отменён")
+    await bot.send_message(chat_id, "❌ Выбор срока отменён.", reply_markup=reply_kb)
+
+
+@dp.callback_query(StateFilter(EmailState.waiting_for_subscription_period), F.data.startswith("subscription_period:"))
+async def select_subscription_period(call: types.CallbackQuery, state: FSMContext):
+    try:
+        subscription_days = int(call.data.split(":", 1)[1])
+    except (ValueError, AttributeError, IndexError):
+        await call.answer("Некорректный срок")
+        return
+
+    if subscription_days not in (30, 90):
+        await call.answer("Некорректный срок")
+        return
+
+    await state.update_data(subscription_days=subscription_days)
+    await state.set_state(EmailState.waiting_for_email)
+
     cancel_markup = InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="❌ Отмена", callback_data="email_cancel")]
         ]
     )
-    await message.answer(
+    amount = _get_subscription_amount(subscription_days)
+    period_label = _get_subscription_label(subscription_days)
+
+    try:
+        if call.message:
+            await call.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        logging.exception("Не удалось убрать inline-кнопки выбора срока")
+
+    await call.answer(f"Выбрано: {period_label}")
+    await bot.send_message(
+        call.from_user.id,
         "📩 По 54-ФЗ мы обязаны отправить вам чек. Пожалуйста, введите вашу почту для получения квитанции. ✉️\n\n"
+        f"📦 Выбранный срок: {period_label}\n"
+        f"💳 Сумма к оплате: {_format_price_rub(amount)} руб\n\n"
         "❌ Нажмите кнопку Отмена ниже для выхода в Главное меню",
         reply_markup=cancel_markup,
     )
-    await state.set_state(EmailState.waiting_for_email)
 
 
 @dp.callback_query(F.data == "email_cancel")
 async def cancel_email_input(call: types.CallbackQuery, state: FSMContext):
     current_state = await state.get_state()
-    if current_state != EmailState.waiting_for_email.state:
+    if current_state not in {
+        EmailState.waiting_for_subscription_period.state,
+        EmailState.waiting_for_email.state,
+    }:
         await call.answer("Отмена уже неактуальна")
         return
 
@@ -611,6 +683,8 @@ async def cancel_email_input(call: types.CallbackQuery, state: FSMContext):
 @dp.message(EmailState.waiting_for_email)
 async def process_email(message: types.Message, state: FSMContext):
     email = message.text.strip()
+    state_data = await state.get_data()
+    subscription_days = state_data.get("subscription_days", 30)
     
     if email.lower() == "отмена":
         await state.clear()
@@ -625,18 +699,24 @@ async def process_email(message: types.Message, state: FSMContext):
     
     await state.clear()
     
-    amount = SUBSCRIPTION_PRICE
-    payment_id, payment_link = await create_payment(amount, message.chat.id, email)
+    amount = _get_subscription_amount(subscription_days)
+    payment_id, payment_link = await create_payment(amount, message.chat.id, email, subscription_days)
     if not payment_id or not payment_link:
         return await message.answer("❌ Не удалось создать платеж. Попробуйте позже или свяжитесь с поддержкой.")
-    database.add_payment(message.chat.id, payment_id, amount)
+    database.add_payment(message.chat.id, payment_id, amount, subscription_days)
     
     price_label = _format_price_rub(amount)
+    period_label = _get_subscription_label(subscription_days)
     markup = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=f"💳 Оплатить ({price_label} руб)", url=payment_link)]
     ])
     
-    await message.answer("✅ Почта сохранена!\n\n💳 Теперь вы можете оплатить подписку. После успешной оплаты чек будет отправлен на вашу почту.", reply_markup=markup)
+    await message.answer(
+        "✅ Почта сохранена!\n\n"
+        f"📦 Срок подписки: {period_label}\n"
+        "💳 Теперь вы можете оплатить подписку. После успешной оплаты чек будет отправлен на вашу почту.",
+        reply_markup=markup,
+    )
 
     
 @dp.message(F.text == "Как настроить VPN? 📖")

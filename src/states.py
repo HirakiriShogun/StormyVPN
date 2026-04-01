@@ -2,6 +2,7 @@ from aiogram.fsm.state import State, StatesGroup
 
 
 class EmailState(StatesGroup):
+    waiting_for_subscription_period = State()
     waiting_for_email = State()
 
 

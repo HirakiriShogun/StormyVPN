@@ -22,21 +22,33 @@ class PaymentService:
         yookassa.Configuration.account_id = shop_id
         yookassa.Configuration.secret_key = secret_key
 
-    def create_payment(self, amount: float, chat_id: int, email: str) -> Tuple[str, str]:
+    def create_payment(
+        self,
+        amount: float,
+        chat_id: int,
+        email: str,
+        subscription_days: int,
+    ) -> Tuple[str, str]:
         """Создаёт платёж и возвращает (payment_id, confirmation_url)."""
         idempotence_key = str(uuid.uuid4())
+        subscription_months = max(subscription_days // 30, 1)
+        description = f"Оплата VPN на {subscription_months} мес. для {chat_id}"
         payment = Payment.create(
             {
                 "amount": {"value": f"{amount:.2f}", "currency": "RUB"},
                 "confirmation": {"type": "redirect", "return_url": self.return_url},
                 "capture": True,
-                "description": f"Оплата VPN для {chat_id}",
-                "metadata": {"chat_id": chat_id, "email": email},
+                "description": description,
+                "metadata": {
+                    "chat_id": chat_id,
+                    "email": email,
+                    "subscription_days": subscription_days,
+                },
                 "receipt": {
                     "customer": {"email": email},
                     "items": [
                         {
-                            "description": "Оплата VPN",
+                            "description": f"Подписка StormyVPN на {subscription_months} мес.",
                             "quantity": 1,
                             "amount": {"value": f"{amount:.2f}", "currency": "RUB"},
                             "vat_code": 1,

@@ -15,7 +15,7 @@ class SubscriptionService:
     def _get_user(self, chat_id: int) -> Optional[Tuple]:
         return self.database.get_user(chat_id)
 
-    async def activate_or_extend(self, chat_id: int, bot: Bot) -> bool:
+    async def activate_or_extend(self, chat_id: int, bot: Bot, subscription_days: int = 30) -> bool:
         """Если пользователь есть — продлеваем, если нет — покупаем новый ключ."""
         user_data = self._get_user(chat_id)
         now = datetime.now()
@@ -24,7 +24,8 @@ class SubscriptionService:
 
         if user_data:
             expiry_date = datetime.strptime(user_data[2], "%d.%m.%Y %H:%M")
-            new_expiry_date = expiry_date + timedelta(days=30)
+            base_expiry_date = expiry_date if expiry_date > now else now
+            new_expiry_date = base_expiry_date + timedelta(days=subscription_days)
             new_expiry_str = new_expiry_date.strftime("%d.%m.%Y %H:%M")
 
             success = self.vpn_api.renew_vpn(
@@ -46,7 +47,7 @@ class SubscriptionService:
             return False
 
         # Новый пользователь
-        new_expiry_date = now + timedelta(days=30)
+        new_expiry_date = now + timedelta(days=subscription_days)
         new_expiry_str = new_expiry_date.strftime("%d.%m.%Y %H:%M")
 
         email = VPNUtils.get_vpn_email(chat_id)
@@ -61,7 +62,7 @@ class SubscriptionService:
             return False
 
         try:
-            result = self.vpn_api.buy_vpn(email, 30)
+            result = self.vpn_api.buy_vpn(email, subscription_days)
         except Exception as e:
             logging.exception("Ошибка при активации VPN для chat_id=%s: %s", chat_id, e)
             await bot.send_message(

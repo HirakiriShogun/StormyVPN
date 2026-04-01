@@ -45,8 +45,14 @@ class VPNDatabase:
             chat_id BIGINT,
             amount REAL,
             status TEXT,
+            subscription_days INTEGER DEFAULT 30,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
+        """
+
+        query_payments_subscription_days_column = """
+        ALTER TABLE payments
+        ADD COLUMN IF NOT EXISTS subscription_days INTEGER DEFAULT 30;
         """
 
         conn = self._get_conn()
@@ -55,6 +61,7 @@ class VPNDatabase:
                 with conn.cursor() as cur:
                     cur.execute(query_users)
                     cur.execute(query_payments)
+                    cur.execute(query_payments_subscription_days_column)
         finally:
             self._put_conn(conn)
 
@@ -181,14 +188,14 @@ class VPNDatabase:
             return "active" if expiry_date > datetime.now() else "expired"
         return "expired"
 
-    def add_payment(self, chat_id, payment_id, amount, status="pending"):
+    def add_payment(self, chat_id, payment_id, amount, subscription_days, status="pending"):
         self.execute_query(
             """
-            INSERT INTO payments (payment_id, chat_id, amount, status)
-            VALUES (%s, %s, %s, %s)
+            INSERT INTO payments (payment_id, chat_id, amount, status, subscription_days)
+            VALUES (%s, %s, %s, %s, %s)
             ON CONFLICT (payment_id) DO NOTHING
             """,
-            (payment_id, chat_id, amount, status),
+            (payment_id, chat_id, amount, status, subscription_days),
         )
 
     def update_payment_status(self, payment_id, status):
@@ -198,7 +205,9 @@ class VPNDatabase:
         )
 
     def get_pending_payments(self):
-        return self.execute_query("SELECT payment_id, chat_id FROM payments WHERE status='pending'")
+        return self.execute_query(
+            "SELECT payment_id, chat_id, COALESCE(subscription_days, 30) FROM payments WHERE status='pending'"
+        )
 
     def remove_payment(self, payment_id):
         self.execute_query("DELETE FROM payments WHERE payment_id=%s", (payment_id,))

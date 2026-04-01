@@ -70,6 +70,9 @@ SHOP_API = os.environ.get("SHOP_API", "")
 ADMIN_IDS = _parse_admin_ids(os.environ.get("ADMIN_IDS", ""), fallback=[1902290413])
 PAYMENT_RETURN_URL = os.environ.get("PAYMENT_RETURN_URL", "https://t.me/StormyVPN_bot")
 SUBSCRIPTION_PRICE = float(os.environ.get("SUBSCRIPTION_PRICE", "179"))
+SUBSCRIPTION_PRICE_3_MONTHS = float(
+    os.environ.get("SUBSCRIPTION_PRICE_3_MONTHS", str(SUBSCRIPTION_PRICE * 3))
+)
 
 DB_HOST = os.environ.get("DB_HOST", "localhost")
 DB_PORT = os.environ.get("DB_PORT", "5432")
