@@ -159,24 +159,34 @@ async def simulate_activity():
 
             try:
                 users = database.get_all_users()
+                total_users, active_users, inactive_users = database.get_user_stats()
                 
                 if users:
                     file_path = DATA_DIR / "users_list.txt"
                     with open(file_path, "w", encoding="utf-8") as file:
                         file.write("📋 Список всех пользователей StormyVPN:\n\n")
                         for user in users:
+                            status_label = "активен" if user[7] else "неактивен"
                             file.write(f"🔹 ID: {user[0]}\n")
                             file.write(f"🔹 Username: {user[1]}\n")
-                            file.write(f"🔹 Подписка до: {user[2]}\n")
-                            file.write(f"🔹 Сервер: {user[6]}\n")
-                            file.write(f"🔹 Inbound ID: {user[5]}\n")
+                            file.write(f"🔹 Статус: {status_label}\n")
+                            file.write(f"🔹 Почта: {user[8] or 'не указана'}\n")
+                            file.write(f"🔹 Подписка до: {user[2] or 'нет активной подписки'}\n")
+                            file.write(f"🔹 Сервер: {user[6] or 'нет'}\n")
+                            file.write(f"🔹 Inbound ID: {user[5] or 'нет'}\n")
                             file.write("-" * 30 + "\n")
                     doc = FSInputFile(file_path)
                     await bot.send_document(test_chat_id, doc, caption="📂 Список пользователей в файле")
                 else:
                     await bot.send_message(test_chat_id, "❌ Нет зарегистрированных пользователей.")
                             
-                await bot.send_message(test_chat_id, f"✅ Бот работает, пользователей: {len(users)}")
+                await bot.send_message(
+                    test_chat_id,
+                    "✅ Бот работает.\n"
+                    f"👥 Всего пользователей: {total_users}\n"
+                    f"🟢 Активных: {active_users}\n"
+                    f"⚪️ Неактивных: {inactive_users}",
+                )
             except Exception as db_error:
                 await bot.send_message(test_chat_id, f"❌ Ошибка работы бота: {db_error}")
 
@@ -189,9 +199,9 @@ async def check_subscriptions():
     while True:
         try:
             now = datetime.now()
-            users = database.get_all_users()
+            users = database.get_active_users()
 
-            for chat_id, username, expiry_date, reminder_sent, gift_used, _, _ in users:
+            for chat_id, username, expiry_date, reminder_sent, gift_used, _, _, _, _ in users:
                 try:
                     expiry_dt = datetime.strptime(expiry_date, "%d.%m.%Y %H:%M")
                 except Exception as e:
@@ -206,7 +216,7 @@ async def check_subscriptions():
                 time_left = (expiry_dt - now).total_seconds()
 
                 if time_left <= 0:
-                    success = database.remove_user(chat_id)
+                    success = database.deactivate_user(chat_id)
                     try:
                         await bot.send_message(
                             chat_id,
@@ -215,7 +225,7 @@ async def check_subscriptions():
                     except Exception as e:
                         logging.warning("Не удалось отправить сообщение об окончании подписки chat_id=%s: %s", chat_id, e)
                     if not success:
-                        logging.warning("Не удалось удалить chat_id=%s — повторим позже.", chat_id)
+                        logging.warning("Не удалось деактивировать chat_id=%s — повторим позже.", chat_id)
 
                 elif time_left < 86400 and not reminder_sent:
                     try:
@@ -262,9 +272,53 @@ def _format_price_rub(amount: float) -> str:
 
 
 async def activate_subscription(chat_id: int, subscription_days: int = 30):
-    success = await subscription_service.activate_or_extend(chat_id, bot, subscription_days)
+    payment_email = database.get_payment_email(chat_id)
+    success = await subscription_service.activate_or_extend(
+        chat_id,
+        bot,
+        subscription_days,
+        payment_email=payment_email,
+    )
     if success:
         await how_to_use_auto(chat_id)
+
+
+async def send_payment_confirmation(
+    chat_id: int,
+    payment_email: str,
+    subscription_days: int,
+    used_saved_email: bool = False,
+):
+    amount = _get_subscription_amount(subscription_days)
+    payment_id, payment_link = await create_payment(amount, chat_id, payment_email, subscription_days)
+    if not payment_id or not payment_link:
+        await bot.send_message(
+            chat_id,
+            "❌ Не удалось создать платеж. Попробуйте позже или свяжитесь с поддержкой.",
+        )
+        return
+
+    database.add_payment(chat_id, payment_id, amount, subscription_days, payment_email)
+
+    price_label = _format_price_rub(amount)
+    period_label = _get_subscription_label(subscription_days)
+    markup = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text=f"💳 Оплатить ({price_label} руб)", url=payment_link)]
+        ]
+    )
+    email_line = (
+        f"📩 Используем сохранённую почту: {payment_email}\n"
+        if used_saved_email
+        else "✅ Почта сохранена!\n"
+    )
+    await bot.send_message(
+        chat_id,
+        f"{email_line}\n"
+        f"📦 Срок подписки: {period_label}\n"
+        "💳 Теперь вы можете оплатить подписку. После успешной оплаты чек будет отправлен на вашу почту.",
+        reply_markup=markup,
+    )
 
 def _extract_expiry_timestamp(inbound_data: dict) -> Optional[int]:
     expiry_timestamp = inbound_data.get("expiryTime")
@@ -289,21 +343,21 @@ def _extract_expiry_timestamp(inbound_data: dict) -> Optional[int]:
     return None
 
 async def sync_users_once(remove_missing: bool = False, preview_only: bool = False) -> dict:
-    users = database.get_all_users_with_keys()
+    users = database.get_active_users_with_keys()
     summary = {
         "total": len(users),
         "updated_expiry": 0,
         "updated_keys": 0,
         "relocated": 0,
         "missing": 0,
-        "removed": 0,
+        "deactivated": 0,
         "errors": 0,
         "skipped": 0,
     }
 
     async with sync_lock:
         for user in users:
-            chat_id, username, vless_key, expiry_date, _, _, inbound_id, server_url = user
+            chat_id, username, vless_key, expiry_date, _, _, inbound_id, server_url, _, _ = user
             if not inbound_id or not server_url:
                 summary["skipped"] += 1
                 continue
@@ -343,8 +397,8 @@ async def sync_users_once(remove_missing: bool = False, preview_only: bool = Fal
                         summary["relocated"] += 1
                 else:
                     if remove_missing and not preview_only:
-                        database.remove_user_local(chat_id)
-                        summary["removed"] += 1
+                        database.deactivate_user_local(chat_id)
+                        summary["deactivated"] += 1
                     else:
                         summary["missing"] += 1
                     continue
@@ -399,7 +453,7 @@ async def sync_with_servers():
 
 def _build_sync_confirm_keyboard(token: str, missing_count: int) -> InlineKeyboardMarkup:
     yes_text = (
-        f"✅ Да, удалить {missing_count}"
+        f"✅ Да, деактивировать {missing_count}"
         if missing_count > 0
         else "✅ Да, применить синхронизацию"
     )
@@ -437,9 +491,9 @@ async def run_manual_sync_preview(notify_chat: int):
         "missing": summary["missing"],
     }
     confirm_line = (
-        "Подтвердить удаление этих пользователей?"
+        "Подтвердить деактивацию этих пользователей?"
         if summary["missing"] > 0
-        else "Подтвердить применение синхронизации? (удалений не будет)"
+        else "Подтвердить применение синхронизации? (деактивации не будет)"
     )
     message = (
         "🔄 Предпросмотр синхронизации завершён.\n"
@@ -447,7 +501,7 @@ async def run_manual_sync_preview(notify_chat: int):
         f"✅ Обновлено сроков: {summary['updated_expiry']}\n"
         f"🔑 Обновлено ключей: {summary['updated_keys']}\n"
         f"🔀 Переназначено серверов: {summary['relocated']}\n"
-        f"🗑️ К удалению (inbound не найден): {summary['missing']}\n"
+        f"⏸️ К деактивации (inbound не найден): {summary['missing']}\n"
         f"⚠️ Ошибок: {summary['errors']}\n"
         f"⏭️ Пропущено: {summary['skipped']}\n\n"
         f"{confirm_line}"
@@ -467,19 +521,28 @@ async def run_manual_sync(notify_chat: int):
         f"✅ Обновлено сроков: {summary['updated_expiry']}\n"
         f"🔑 Обновлено ключей: {summary['updated_keys']}\n"
         f"🔀 Переназначено серверов: {summary['relocated']}\n"
-        f"🗑️ Удалено (нет inbound): {summary['removed']}\n"
+        f"⏸️ Деактивировано (нет inbound): {summary['deactivated']}\n"
         f"⚠️ Ошибок: {summary['errors']}\n"
         f"⏭️ Пропущено: {summary['skipped']}"
     )
     await bot.send_message(notify_chat, message, reply_markup=get_admin_keyboard())
 
 
-async def handle_activation_with_retries(chat_id: int, subscription_days: int):
+async def handle_activation_with_retries(
+    chat_id: int,
+    subscription_days: int,
+    payment_email: Optional[str],
+):
     """Пробует активировать/продлить до 3 раз с интервалом 60 сек."""
     max_attempts = 3
     delay_seconds = 60
     for attempt in range(1, max_attempts + 1):
-        success = await subscription_service.activate_or_extend(chat_id, bot, subscription_days)
+        success = await subscription_service.activate_or_extend(
+            chat_id,
+            bot,
+            subscription_days,
+            payment_email=payment_email,
+        )
         if success:
             await how_to_use_auto(chat_id)
             return
@@ -508,7 +571,7 @@ async def check_payment_status():
         try:
             pending_payments = database.get_pending_payments()
 
-            for payment_id, chat_id, subscription_days in pending_payments:
+            for payment_id, chat_id, subscription_days, payment_email in pending_payments:
                 try:
                     status = await asyncio.to_thread(payment_service.get_payment_status, payment_id)
                 except Exception as e:
@@ -526,7 +589,7 @@ async def check_payment_status():
                 if status == "succeeded":
                     database.update_payment_status(payment_id, "succeeded")
                     create_background_task(
-                        handle_activation_with_retries(chat_id, subscription_days),
+                        handle_activation_with_retries(chat_id, subscription_days, payment_email),
                         name=f"activation_after_payment_{chat_id}",
                     )
                     database.remove_payment(payment_id)
@@ -626,6 +689,25 @@ async def select_subscription_period(call: types.CallbackQuery, state: FSMContex
     if subscription_days not in (30, 90):
         await call.answer("Некорректный срок")
         return
+    period_label = _get_subscription_label(subscription_days)
+
+    try:
+        if call.message:
+            await call.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        logging.exception("Не удалось убрать inline-кнопки выбора срока")
+
+    await call.answer(f"Выбрано: {period_label}")
+    stored_email = database.get_payment_email(call.from_user.id)
+    if stored_email:
+        await state.clear()
+        await send_payment_confirmation(
+            call.from_user.id,
+            stored_email,
+            subscription_days,
+            used_saved_email=True,
+        )
+        return
 
     await state.update_data(subscription_days=subscription_days)
     await state.set_state(EmailState.waiting_for_email)
@@ -636,15 +718,6 @@ async def select_subscription_period(call: types.CallbackQuery, state: FSMContex
         ]
     )
     amount = _get_subscription_amount(subscription_days)
-    period_label = _get_subscription_label(subscription_days)
-
-    try:
-        if call.message:
-            await call.message.edit_reply_markup(reply_markup=None)
-    except Exception:
-        logging.exception("Не удалось убрать inline-кнопки выбора срока")
-
-    await call.answer(f"Выбрано: {period_label}")
     await bot.send_message(
         call.from_user.id,
         "📩 По 54-ФЗ мы обязаны отправить вам чек. Пожалуйста, введите вашу почту для получения квитанции. ✉️\n\n"
@@ -698,25 +771,7 @@ async def process_email(message: types.Message, state: FSMContext):
         return
     
     await state.clear()
-    
-    amount = _get_subscription_amount(subscription_days)
-    payment_id, payment_link = await create_payment(amount, message.chat.id, email, subscription_days)
-    if not payment_id or not payment_link:
-        return await message.answer("❌ Не удалось создать платеж. Попробуйте позже или свяжитесь с поддержкой.")
-    database.add_payment(message.chat.id, payment_id, amount, subscription_days)
-    
-    price_label = _format_price_rub(amount)
-    period_label = _get_subscription_label(subscription_days)
-    markup = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=f"💳 Оплатить ({price_label} руб)", url=payment_link)]
-    ])
-    
-    await message.answer(
-        "✅ Почта сохранена!\n\n"
-        f"📦 Срок подписки: {period_label}\n"
-        "💳 Теперь вы можете оплатить подписку. После успешной оплаты чек будет отправлен на вашу почту.",
-        reply_markup=markup,
-    )
+    await send_payment_confirmation(message.chat.id, email, subscription_days)
 
     
 @dp.message(F.text == "Как настроить VPN? 📖")
@@ -728,8 +783,8 @@ async def user_profile(message: types.Message):
     chat_id = message.chat.id
     user_data = database.get_user(chat_id)
 
-    if user_data:
-        username, vless_key, expiry_date, _, _, _ = user_data
+    if user_data and user_data[7] and user_data[1] and user_data[2]:
+        username, vless_key, expiry_date, _, _, _, _, _ = user_data
 
         await message.answer(
                 f"*👤 Ваш личный кабинет*\n\n"
@@ -743,7 +798,13 @@ async def user_profile(message: types.Message):
         )
 
     else:
-        await message.answer("*❌ Вы еще не активировали VPN.*", parse_mode='Markdown')
+        await message.answer(
+            "*❌ У вас нет активной подписки.*\n\nНажмите кнопку оформления или продления в главном меню.",
+            parse_mode='Markdown',
+            reply_markup=get_main_keyboard(
+                database.get_subscription_status(chat_id), chat_id in ADMIN_IDS
+            ),
+        )
 
         
 @dp.message(F.text == "Администрирование ⚙️")
@@ -756,7 +817,7 @@ async def admin_panel(message):
 async def sync_database(message: types.Message):
     chat_id = message.chat.id
     if chat_id in ADMIN_IDS:
-        await message.answer("🔄 Запускаю проверку 3x-ui. Сначала покажу, сколько пользователей будет удалено.")
+        await message.answer("🔄 Запускаю проверку 3x-ui. Сначала покажу, сколько пользователей будет деактивировано.")
         create_background_task(run_manual_sync_preview(chat_id), name=f"manual_sync_preview_{chat_id}")
     else:
         await message.answer("🚫 У вас нет доступа.")
@@ -785,7 +846,7 @@ async def confirm_sync_yes(call: types.CallbackQuery):
     await call.answer("Подтверждено")
     await bot.send_message(
         chat_id,
-        "✅ Подтверждение принято. Запускаю удаление пользователей, которых нет в 3x-ui.",
+        "✅ Подтверждение принято. Запускаю деактивацию пользователей, которых нет в 3x-ui.",
     )
     create_background_task(run_manual_sync(chat_id), name=f"manual_sync_{chat_id}")
 
@@ -803,8 +864,8 @@ async def confirm_sync_no(call: types.CallbackQuery):
     except Exception:
         logging.exception("Не удалось убрать кнопки подтверждения sync_confirm_no")
 
-    await call.answer("Удаление отменено")
-    await bot.send_message(chat_id, "❌ Удаление отменено. Данные не удалялись.", reply_markup=get_admin_keyboard())
+    await call.answer("Деактивация отменена")
+    await bot.send_message(chat_id, "❌ Деактивация отменена. Данные не изменялись.", reply_markup=get_admin_keyboard())
         
 @dp.message(F.text == "Главное меню")
 async def back_to_main_menu(message: types.Message):
@@ -825,11 +886,14 @@ async def show_all_users(message: types.Message):
             with open(file_path, "w", encoding="utf-8") as file:
                 file.write("📋 Список всех пользователей StormyVPN:\n\n")
                 for user in users:
+                    status_label = "активен" if user[7] else "неактивен"
                     file.write(f"🔹 ID: {user[0]}\n")
                     file.write(f"🔹 Username: {user[1]}\n")
-                    file.write(f"🔹 Подписка до: {user[2]}\n")
-                    file.write(f"🔹 Сервер: {user[6]}\n")
-                    file.write(f"🔹 Inbound ID: {user[5]}\n")
+                    file.write(f"🔹 Статус: {status_label}\n")
+                    file.write(f"🔹 Почта: {user[8] or 'не указана'}\n")
+                    file.write(f"🔹 Подписка до: {user[2] or 'нет активной подписки'}\n")
+                    file.write(f"🔹 Сервер: {user[6] or 'нет'}\n")
+                    file.write(f"🔹 Inbound ID: {user[5] or 'нет'}\n")
                     file.write("-" * 30 + "\n")
             doc = FSInputFile(file_path)
             await bot.send_document(chat_id, doc, caption="📂 Список пользователей в файле")
@@ -927,7 +991,7 @@ async def process_add_user_days(message: types.Message, state: FSMContext):
     user_id = data.get("user_id")
     username = data.get("username")
 
-    email = VPNUtils.get_vpn_email(user_id)
+    vpn_email = VPNUtils.get_vpn_email(user_id)
     vpn_api.select_server()
     if not vpn_api.active_server:
         logging.error("Нет активного сервера для выдачи ключа (user_id=%s)", user_id)
@@ -935,7 +999,7 @@ async def process_add_user_days(message: types.Message, state: FSMContext):
         await state.clear()
         return
     try:
-        result = vpn_api.buy_vpn(email, days)
+        result = vpn_api.buy_vpn(vpn_email, days)
     except Exception as e:
         logging.exception("Ошибка выдачи ключа при ручном добавлении пользователя: %s", e)
         await message.answer("❌ Ошибка при получении VPN-ключа.", reply_markup=get_admin_keyboard())
@@ -1066,13 +1130,13 @@ async def process_gift_days(message: types.Message, state: FSMContext):
 
 
 async def add_days_to_all_users(days: int, notify_chat: int):
-    users = database.get_all_users()
+    users = database.get_active_users()
     updated = 0
     failed = 0
     skipped = 0
 
     for user in users:
-        chat_id, username, expiry_date, _, _, inbound_id, server_url = user
+        chat_id, username, expiry_date, _, _, inbound_id, server_url, _, _ = user
         # Блокирующий запрос к 3x-ui выносим из event loop
         server_data = await asyncio.to_thread(vpn_api.get_inbound_data, inbound_id, server_url)
 
